@@ -3,9 +3,10 @@ import pandas as pd
 import requests
 import json
 import os
+from urllib.parse import quote
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="Fairway Sweats", layout="wide", page_icon="⛳")
+st.set_page_config(page_title="The Clubhouse", layout="wide", page_icon="⛳")
 st_autorefresh(interval=300000, key="refresh")
 
 # ============================================================
@@ -18,11 +19,121 @@ OVERALL_PCT   = 0.40
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1hH--Z2Ur1yN8p1R5uftC_nDF6TQz5T7Z5WJWKO6K07c/export?format=csv"
 
-# ── Change this to your own password ──
-ADMIN_PASSWORD = "fairway2025"
+# ── Admin password (move to env var before pushing to GitHub) ──
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "fairway2025")
 
 # ── Saved next to this script so settings survive restarts ──
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin_state.json")
+
+# ============================================================
+# ENTRY FLOW CONFIG  ← FILL THESE IN
+# ============================================================
+# Your Venmo handle (no @)
+VENMO_HANDLE = "caden2323"
+
+# Google Form submit endpoint
+FORM_SUBMIT_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeBkLpZ0lPOl29jP2BrEEU1NKC4fcv0JZ3qDjeMpwpW5kGS-g/formResponse"
+
+# Entry IDs from your Google Form
+FORM_FIELD_IDS = {
+    "name":  "entry.1409538491",
+    "email": "entry.655700445",
+    "venmo": "entry.753893729",
+    "pick1": "entry.1348718021",
+    "pick2": "entry.1331079764",
+    "pick3": "entry.430664969",
+}
+
+# Tier lists — update each tournament with that week's field
+# Must match the options in your Google Form dropdowns EXACTLY
+TIER_1 = [
+    "Scottie Scheffler",
+    "Xander Schauffele",
+    "Matt Fitzpatrick",
+    "Cameron Young",
+    "Russell Henley",
+    "Tommy Fleetwood",
+    "Patrick Cantlay",
+    "Ludvig Åberg",
+    "Collin Morikawa",
+    "Jordan Spieth",
+    "Si Woo Kim",
+    "Maverick McNealy",
+    "Robert MacIntyre",
+    "Sam Burns",
+    "Viktor Hovland",
+    "Sepp Straka",
+    "Jake Knapp",
+    "Justin Thomas",
+    "Jacob Bridgeman",
+    "Min Woo Lee",
+    "Shane Lowry",
+    "Ryo Hisatsune",
+    "Alex Noren",
+    "Akshay Bhatia",
+    "Jason Day",
+    "Brian Harman",
+]
+TIER_2 = [
+    "Sahith Theegala",
+    "J.J. Spaun",
+    "Chris Gotterup",
+    "Ben Griffin",
+    "Daniel Berger",
+    "Harris English",
+    "Sudarshan Yellamaraju",
+    "J.T. Poston",
+    "Ryan Gerard",
+    "Sungjae Im",
+    "Gary Woodland",
+    "Nicolai Højgaard",
+    "Keegan Bradley",
+    "Kurt Kitayama",
+    "Wyndham Clark",
+    "Matt Wallace",
+    "Samuel Stevens",
+    "Corey Conners",
+    "Michael Thorbjornsen",
+    "Rickie Fowler",
+    "Harry Hall",
+    "Max Homa",
+    "Marco Penge",
+    "Andrew Novak",
+    "Nick Taylor",
+    "Andrew Putnam",
+]
+TIER_3 = [
+    "Nico Echavarria",
+    "Tony Finau",
+    "Bud Cauley",
+    "Matt McCarty",
+    "Billy Horschel",
+    "Sami Valimaki",
+    "Michael Kim",
+    "Pierceson Coody",
+    "Denny McCarthy",
+    "Austin Smotherman",
+    "Jordan Smith",
+    "Michael Brennan",
+    "Ryan Fox",
+    "Taylor Pendrith",
+    "Ricky Castillo",
+    "Chandler Blanchet",
+    "Johnny Keefer",
+    "Patrick Rodgers",
+    "Brian Campbell",
+    "David Lipsky",
+    "William Mouw",
+    "Karl Vilips",
+    "Lucas Glover",
+    "Steven Fisk",
+    "Jhonattan Vegas",
+    "Aldrich Potgieter",
+    "Adam Schenk",
+    "Garrick Higgo",
+    "Tom Hoge",
+    "Joe Highsmith",
+]
 
 # ============================================================
 # ADMIN STATE  (load / save)
@@ -32,6 +143,8 @@ DEFAULT_STATE = {
     "score_overrides":     {},
     "entries_frozen":      False,
     "tournament_finished": False,
+    "tournament_name":     "",
+    "history":             [],
 }
 
 def load_state():
@@ -123,6 +236,43 @@ html, body, [class*="css"] {
     font-size:0.62rem; padding:1px 5px; border-radius:10px; margin-left:3px;
 }
 
+/* Entry form */
+.entry-form-wrap {
+    background: linear-gradient(135deg,#111a11,#141f14);
+    border:1px solid #2a4a2a; border-radius:14px; padding:18px 20px; margin: 10px 0 18px 0;
+}
+.entry-form-title {
+    font-family:'Playfair Display',serif; font-size:1.1rem; color:#fff; margin-bottom:4px;
+}
+.entry-form-sub { font-size:0.72rem; color:#4a6b4a; letter-spacing:2px; text-transform:uppercase; margin-bottom:12px; }
+
+.venmo-cta {
+    background: linear-gradient(135deg, #3d95ce, #2a7cb8);
+    color:#fff !important; padding:14px 26px; border-radius:10px;
+    font-weight:700; font-size:1rem; text-decoration:none !important;
+    letter-spacing:1px; display:inline-block; border:none; text-align:center;
+    box-shadow: 0 4px 14px #2a7cb855;
+}
+.success-card {
+    background:linear-gradient(135deg,#0e2a0e,#143514);
+    border:1px solid #2a6a2a; border-radius:14px; padding:20px; margin:10px 0 18px 0;
+    text-align:center;
+}
+.success-title { font-family:'Playfair Display',serif; font-size:1.3rem; color:#4ade80; margin-bottom:6px; }
+.success-sub { font-size:0.82rem; color:#8aad8a; margin-bottom:14px; }
+
+.profile-block {
+    background:#0d160d; border:1px solid #2a4a2a; border-radius:10px;
+    padding:12px 16px; margin:4px auto 16px auto; max-width:480px;
+}
+.profile-label { font-size:0.62rem; color:#4a6b4a; letter-spacing:2px; text-transform:uppercase; margin-bottom:8px; }
+.profile-stats { display:flex; justify-content:space-around; gap:8px; flex-wrap:wrap; }
+.profile-stat { text-align:center; flex:1; min-width:60px; }
+.profile-stat-val { font-family:'Playfair Display',serif; font-size:1.3rem; font-weight:700; color:#fff; line-height:1; }
+.profile-stat-label { font-size:0.62rem; color:#4a6b4a; text-transform:uppercase; letter-spacing:1px; margin-top:3px; }
+.profile-newbie { font-size:0.82rem; color:#8aad8a; text-align:center; padding:4px 8px; }
+.profile-newbie strong { color:#fff; }
+
 /* Mobile responsive */
 @media (max-width: 640px) {
     .block-container { padding: 1rem 0.75rem !important; }
@@ -134,6 +284,7 @@ html, body, [class*="css"] {
     .pick-chip { font-size: 0.68rem; padding: 2px 6px; }
     .winners-grid { grid-template-columns: repeat(3,1fr) !important; }
     .tourney-row { padding: 8px 12px; font-size: 0.8rem; }
+    .venmo-cta { width: 100%; padding: 16px; }
 }
 
 .winners-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin-bottom:4px; }
@@ -172,22 +323,163 @@ def fmt_score(val):
     if val < 0:   return str(val)
     return f"+{val}"
 
+def venmo_deep_link(amount=ENTRY_FEE, note="The Clubhouse"):
+    return f"https://venmo.com/{VENMO_HANDLE}?txn=pay&amount={amount}&note={quote(note)}"
+
+def get_player_stats(email, history):
+    """Look up a single player's cumulative stats by email. Returns None if no history."""
+    if not email:
+        return None
+    email = email.lower().strip()
+    tournaments = 0
+    wins = 0
+    best_finish = 999
+    total_winnings = 0.0
+    last_name = ""
+    for t in history:
+        for entry in t.get("entries", []):
+            if (entry.get("email") or "").lower().strip() == email:
+                tournaments += 1
+                wins += entry.get("daily_wins", 0)
+                if entry.get("overall_winner"):
+                    wins += 1
+                rank = entry.get("rank", 999)
+                if rank < best_finish:
+                    best_finish = rank
+                total_winnings += float(entry.get("winnings", 0) or 0)
+                last_name = entry.get("name", last_name)
+    if tournaments == 0:
+        return None
+    # Overall rank on leaderboard
+    lb = compute_leaderboard(history)
+    rank_pos = None
+    for i, p in enumerate(lb, 1):
+        # match by display name + tournaments count as a proxy
+        if p["display_name"] == last_name and p["tournaments"] == tournaments:
+            rank_pos = i
+            break
+    return {
+        "display_name": last_name,
+        "tournaments": tournaments,
+        "wins": wins,
+        "best_finish": best_finish if best_finish < 999 else None,
+        "total_winnings": total_winnings,
+        "rank_pos": rank_pos,
+    }
+
+def compute_leaderboard(history):
+    """Aggregate per-player stats across all archived tournaments, keyed by email."""
+    players = {}
+    for tourney in history:
+        for entry in tourney.get("entries", []):
+            email = (entry.get("email") or "").lower().strip()
+            # Fall back to name if email missing
+            if not email:
+                email = "__noemail__:" + (entry.get("name", "unknown").lower().strip())
+            if email not in players:
+                players[email] = {
+                    "display_name": entry.get("name", ""),
+                    "tournaments": 0, "wins": 0, "best_finish": 999, "total_winnings": 0.0,
+                }
+            p = players[email]
+            p["display_name"] = entry.get("name", p["display_name"])
+            p["tournaments"] += 1
+            p["wins"] += entry.get("daily_wins", 0)
+            if entry.get("overall_winner"):
+                p["wins"] += 1
+            rank = entry.get("rank", 999)
+            if rank < p["best_finish"]:
+                p["best_finish"] = rank
+            p["total_winnings"] += float(entry.get("winnings", 0) or 0)
+    return sorted(
+        players.values(),
+        key=lambda p: (-p["total_winnings"], -p["wins"], p["best_finish"])
+    )
+
+def build_tournament_archive(tournament_name, df_display_local, daily_winners_dict, daily_payout_val, overall_payout_val, finished_flag):
+    """Package current tournament state into an archive record."""
+    from datetime import datetime
+    overall_winner_name = df_display_local.iloc[0]["Name"] if (finished_flag and not df_display_local.empty) else None
+    daily_win_counts = {}
+    for day, winner in daily_winners_dict.items():
+        if winner:
+            daily_win_counts[winner] = daily_win_counts.get(winner, 0) + 1
+    entries = []
+    for i, row in df_display_local.iterrows():
+        rank = i + 1
+        name = row["Name"]
+        daily_wins = daily_win_counts.get(name, 0)
+        is_overall = (name == overall_winner_name) if overall_winner_name else False
+        winnings = (daily_wins * daily_payout_val) + (overall_payout_val if is_overall else 0)
+        entries.append({
+            "name": name,
+            "email": row.get("Email", "") if "Email" in df_display_local.columns else "",
+            "venmo": row["Venmo"],
+            "rank": rank,
+            "total_score": int(row["Total"]),
+            "picks": [p for p, _ in row["Picks"]],
+            "daily_wins": daily_wins,
+            "overall_winner": is_overall,
+            "winnings": round(float(winnings), 2),
+        })
+    return {
+        "tournament_name": tournament_name or f"Tournament {datetime.now().strftime('%Y-%m-%d')}",
+        "archived_at": datetime.now().isoformat(),
+        "daily_winners": dict(daily_winners_dict),
+        "overall_winner": overall_winner_name,
+        "entries": entries,
+    }
+
+def submit_to_google_form(name, email, venmo, pick1, pick2, pick3):
+    """POST directly to the Google Form's formResponse endpoint.
+    Returns (ok, detail) — ok is True/False, detail is a string with the reason on failure."""
+    # Config sanity check
+    if "REPLACE_WITH_YOUR_FORM_ID" in FORM_SUBMIT_URL:
+        return False, "FORM_SUBMIT_URL is still a placeholder — fill it in at the top of app.py"
+    for key, val in FORM_FIELD_IDS.items():
+        if "XXXXXXXXX" in val or not val.startswith("entry."):
+            return False, f"FORM_FIELD_IDS['{key}'] is still a placeholder — fill in all entry IDs"
+
+    try:
+        data = {
+            FORM_FIELD_IDS["name"]:  name,
+            FORM_FIELD_IDS["email"]: email,
+            FORM_FIELD_IDS["venmo"]: venmo,
+            FORM_FIELD_IDS["pick1"]: pick1,
+            FORM_FIELD_IDS["pick2"]: pick2,
+            FORM_FIELD_IDS["pick3"]: pick3,
+        }
+        r = requests.post(FORM_SUBMIT_URL, data=data, timeout=10)
+        if r.status_code in (200, 302):
+            return True, ""
+        return False, f"Google returned HTTP {r.status_code} — check your FORM_SUBMIT_URL and FORM_FIELD_IDS"
+    except requests.exceptions.Timeout:
+        return False, "Request timed out hitting Google Forms"
+    except Exception as e:
+        return False, f"Error: {type(e).__name__}: {e}"
+
 # ============================================================
 # LOAD SHEET
 # ============================================================
-try:
-    df = pd.read_csv(SHEET_URL)
-    df.columns = df.columns.str.strip()
-    df = df.astype(str).apply(lambda col: col.str.strip())
-    df = df.replace("nan","").replace("None","")
-    df = df.dropna(how="all")
-    df = df[(df["Pick 1"].str.len()>0)|(df["Pick 2"].str.len()>0)|(df["Pick 3"].str.len()>0)]
-except:
-    df = pd.DataFrame(columns=["Name","Venmo","Pick 1","Pick 2","Pick 3"])
+@st.cache_data(ttl=30)
+def load_sheet():
+    try:
+        df = pd.read_csv(SHEET_URL)
+        df.columns = df.columns.str.strip()
+        df = df.astype(str).apply(lambda col: col.str.strip())
+        df = df.replace("nan","").replace("None","")
+        df = df.dropna(how="all")
+        df = df[(df["Pick 1"].str.len()>0)|(df["Pick 2"].str.len()>0)|(df["Pick 3"].str.len()>0)]
+        return df
+    except:
+        return pd.DataFrame(columns=["Name","Venmo","Pick 1","Pick 2","Pick 3"])
+
+df = load_sheet()
 
 # ============================================================
 # ESPN DATA
 # ============================================================
+@st.cache_data(ttl=30)
 def get_scores():
     try:
         url  = f"https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?tournamentId={TOURNAMENT_ID}"
@@ -226,7 +518,8 @@ for _, row in df.iterrows():
     scores = [score_map.get(p, 0) for p in picks]
     total  = sum(scores)
     best   = scores.index(min(scores))
-    rows.append({"Name":row["Name"],"Venmo":row["Venmo"],
+    email  = row["Email"] if "Email" in df.columns else ""
+    rows.append({"Name":row["Name"],"Email":email,"Venmo":row["Venmo"],
                  "Picks":list(zip(picks,scores)),"Total":total,"BestIndex":best})
 
 df_display = pd.DataFrame(rows).sort_values("Total").reset_index(drop=True) if rows else pd.DataFrame()
@@ -241,24 +534,32 @@ overall_payout = round(pot * OVERALL_PCT, 2)
 col_title, col_stats = st.columns([2, 1])
 
 with col_title:
-    st.markdown('<div class="main-title">⛳ Fairway Sweats</div>', unsafe_allow_html=True)
-    st.markdown('<div class="main-subtitle">PGA Tournament Pool</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">⛳ The Clubhouse</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-subtitle">Weekly Golf Pool</div>', unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
-    if not admin["entries_frozen"]:
-        st.markdown("""
-        <a href="https://forms.gle/D6yHxPGNE1pt61Cv6" target="_blank" style="
-            background:#2a4a2a; color:#e8ede8; padding:10px 22px; border-radius:8px;
-            font-weight:600; font-size:0.85rem; text-decoration:none; letter-spacing:1px;
-            text-transform:uppercase; border:1px solid #3a6a3a; display:inline-block;">
-            + Enter Pool
-        </a>""", unsafe_allow_html=True)
-    else:
+
+    if admin["entries_frozen"]:
         st.markdown("""
         <div style="display:inline-block; background:#1a0a0a; border:1px solid #5a2a2a;
             color:#f87171; padding:10px 22px; border-radius:8px; font-weight:600;
             font-size:0.85rem; letter-spacing:1px; text-transform:uppercase;">
             🔒 Entries Closed
         </div>""", unsafe_allow_html=True)
+    else:
+        # Toggle for inline entry form
+        if "entry_mode" not in st.session_state:
+            st.session_state.entry_mode = False
+        if "entry_submitted" not in st.session_state:
+            st.session_state.entry_submitted = False
+        if "entry_submitted_name" not in st.session_state:
+            st.session_state.entry_submitted_name = ""
+        if "entry_submitted_email" not in st.session_state:
+            st.session_state.entry_submitted_email = ""
+
+        if not st.session_state.entry_mode and not st.session_state.entry_submitted:
+            if st.button("+ Enter Pool", key="open_entry"):
+                st.session_state.entry_mode = True
+                st.rerun()
 
 with col_stats:
     st.markdown(f"""
@@ -272,6 +573,93 @@ with col_stats:
             <div class="stat-label">Entries</div>
         </div>
     </div>""", unsafe_allow_html=True)
+
+# ============================================================
+# INLINE ENTRY FORM
+# ============================================================
+if not admin["entries_frozen"]:
+    # Success state (after submit)
+    if st.session_state.get("entry_submitted"):
+        submitted_name = st.session_state.entry_submitted_name or "You"
+        vlink = venmo_deep_link(ENTRY_FEE, "The Clubhouse")
+        st.markdown(f"""
+        <div class="success-card">
+            <div class="success-title">✅ Picks locked in, {submitted_name}</div>
+            <div class="success-sub">Tap below to send ${ENTRY_FEE} via Venmo. Your entry isn't final until payment hits.</div>
+            <a href="{vlink}" target="_blank" class="venmo-cta">Pay ${ENTRY_FEE} via Venmo</a>
+        </div>
+        """, unsafe_allow_html=True)
+        c1, c2 = st.columns([1, 6])
+        with c1:
+            if st.button("Enter another", key="reset_entry"):
+                st.session_state.entry_submitted = False
+                st.session_state.entry_mode = True
+                st.rerun()
+
+    # Entry form state
+    elif st.session_state.get("entry_mode"):
+        st.markdown('<div class="entry-form-wrap">', unsafe_allow_html=True)
+        st.markdown('<div class="entry-form-title">Pick 3 Golfers</div>', unsafe_allow_html=True)
+        st.markdown('<div class="entry-form-sub">One from each tier — $5 entry</div>', unsafe_allow_html=True)
+
+        with st.form("entry_form", clear_on_submit=False):
+            cA, cB = st.columns(2)
+            with cA:
+                name_in  = st.text_input("Your name", key="in_name", placeholder="First Last")
+            with cB:
+                email_in = st.text_input("Email", key="in_email", placeholder="you@example.com")
+
+            venmo_in = st.text_input("Venmo handle", key="in_venmo", placeholder="yourhandle (no @)")
+
+            st.markdown("**Tier 1 — Favorites**")
+            p1 = st.radio("Pick 1", TIER_1, index=None, horizontal=False, label_visibility="collapsed", key="in_p1")
+
+            st.markdown("**Tier 2 — Contenders**")
+            p2 = st.radio("Pick 2", TIER_2, index=None, horizontal=False, label_visibility="collapsed", key="in_p2")
+
+            st.markdown("**Tier 3 — Sleepers**")
+            p3 = st.radio("Pick 3", TIER_3, index=None, horizontal=False, label_visibility="collapsed", key="in_p3")
+
+            sub_col, cancel_col = st.columns([2, 1])
+            with sub_col:
+                submit = st.form_submit_button(f"Submit & Pay ${ENTRY_FEE} via Venmo", use_container_width=True)
+            with cancel_col:
+                cancel = st.form_submit_button("Cancel", use_container_width=True)
+
+            if cancel:
+                st.session_state.entry_mode = False
+                st.rerun()
+
+            if submit:
+                errors = []
+                if not name_in or not name_in.strip():   errors.append("Name is required.")
+                if not email_in or not email_in.strip(): errors.append("Email is required.")
+                elif "@" not in email_in or "." not in email_in.split("@")[-1]:
+                    errors.append("Please enter a valid email address.")
+                if not venmo_in or not venmo_in.strip(): errors.append("Venmo handle is required.")
+                if not p1: errors.append("Pick 1 (Tier 1) is required.")
+                if not p2: errors.append("Pick 2 (Tier 2) is required.")
+                if not p3: errors.append("Pick 3 (Tier 3) is required.")
+
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                else:
+                    venmo_clean = venmo_in.strip().lstrip("@")
+                    email_clean = email_in.strip()
+                    ok, detail = submit_to_google_form(name_in.strip(), email_clean, venmo_clean, p1, p2, p3)
+                    if ok:
+                        st.session_state.entry_submitted = True
+                        st.session_state.entry_submitted_name = name_in.strip().split()[0]
+                        st.session_state.entry_submitted_email = email_clean.lower()
+                        st.session_state.entry_mode = False
+                        # Invalidate the sheet cache so new entry shows up
+                        load_sheet.clear()
+                        st.rerun()
+                    else:
+                        st.error(f"Submission failed — {detail}")
+
+        st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
@@ -369,6 +757,53 @@ else:
     </div>"""
 
 st.markdown(f'<div class="winners-grid">{cards_html}</div>', unsafe_allow_html=True)
+st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+# ============================================================
+# HALL OF FAME (ALL-TIME LEADERBOARD)
+# ============================================================
+st.markdown('<div class="section-title">Hall of Fame</div>', unsafe_allow_html=True)
+
+leaderboard = compute_leaderboard(admin.get("history", []))
+
+if leaderboard:
+    header_html = """
+    <div class="tourney-row" style="border-bottom:1px solid #2a4a2a;background:#0d160d;">
+        <span style="width:28px;color:#8aad8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;">#</span>
+        <span style="flex:2;color:#8aad8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;">Player</span>
+        <span style="width:55px;color:#8aad8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;text-align:center;">Pools</span>
+        <span style="width:50px;color:#8aad8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;text-align:center;">Wins</span>
+        <span style="width:50px;color:#8aad8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;text-align:center;">Best</span>
+        <span style="width:80px;color:#8aad8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;text-align:right;">Won</span>
+    </div>
+    """
+    rows_html = ""
+    for i, p in enumerate(leaderboard[:25], 1):
+        medal = ["🥇","🥈","🥉"][i-1] if i <= 3 else str(i)
+        best = str(p["best_finish"]) if p["best_finish"] < 999 else "—"
+        name_cls_weight = "700" if i <= 3 else "500"
+        name_cls_color = "#fff" if i <= 3 else "#e8ede8"
+        rows_html += f"""
+        <div class="tourney-row">
+            <span style="width:28px;color:#4a6b4a;font-weight:600;font-size:0.82rem;">{medal}</span>
+            <span style="flex:2;color:{name_cls_color};font-weight:{name_cls_weight};">{p['display_name']}</span>
+            <span style="width:55px;color:#8aad8a;text-align:center;">{p['tournaments']}</span>
+            <span style="width:50px;color:#fff;text-align:center;font-weight:700;">{p['wins']}</span>
+            <span style="width:50px;color:#8aad8a;text-align:center;">{best}</span>
+            <span style="width:80px;color:#4ade80;text-align:right;font-weight:700;">${p['total_winnings']:.0f}</span>
+        </div>
+        """
+    st.markdown(f'<div class="tourney-container">{header_html}{rows_html}</div>', unsafe_allow_html=True)
+    st.caption(f"Showing top {min(25, len(leaderboard))} of {len(leaderboard)} all-time players.")
+else:
+    st.markdown("""
+    <div style="text-align:center;padding:40px 20px;color:#4a6b4a;">
+        <div style="font-size:2rem;">🏆</div>
+        <div style="font-family:'Playfair Display',serif;font-size:1.2rem;color:#fff;margin-top:8px;">Hall of Fame opens after Sunday</div>
+        <div style="font-size:0.8rem;color:#4a6b4a;margin-top:4px;">All-time leaders appear here once tournaments wrap.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
 # ============================================================
@@ -474,6 +909,53 @@ with st.expander("🔐 Admin", expanded=False):
                 if rc2.button("✕", key=f"rm_{p}"):
                     admin["score_overrides"].pop(p, None)
                     save_state(admin); st.rerun()
+
+        st.markdown("---")
+
+        # ── Archive tournament ──
+        st.markdown("**📦 Archive Tournament**")
+        st.caption("Lock in this week's final results to the all-time Hall of Fame. Do this after Sunday once winners are set.")
+        arc_name = st.text_input(
+            "Tournament name",
+            value=admin.get("tournament_name", ""),
+            placeholder="e.g. RBC Heritage 2026",
+            key="arc_name"
+        )
+        if st.button("📦 Archive This Tournament", key="btn_archive"):
+            if not arc_name.strip():
+                st.error("Please enter a tournament name first.")
+            elif df_display.empty:
+                st.error("No entries to archive.")
+            else:
+                archive = build_tournament_archive(
+                    arc_name.strip(), df_display, admin["daily_winners"],
+                    daily_payout, overall_payout, is_finished
+                )
+                admin.setdefault("history", []).append(archive)
+                admin["tournament_name"] = arc_name.strip()
+                save_state(admin)
+                st.success(f"✓ Archived '{arc_name}' with {len(archive['entries'])} entries")
+                st.rerun()
+
+        # List archived tournaments with delete option
+        if admin.get("history"):
+            st.markdown("**Archived tournaments:**")
+            for i, t in enumerate(admin["history"]):
+                rc1, rc2 = st.columns([5,1])
+                winner_str = t.get("overall_winner") or "—"
+                rc1.markdown(f"`{t['tournament_name']}` — {len(t['entries'])} entries · winner: **{winner_str}**")
+                if rc2.button("✕", key=f"rm_arc_{i}"):
+                    admin["history"].pop(i)
+                    save_state(admin)
+                    st.rerun()
+
+        st.markdown("---")
+
+        # ── Clear sheet cache ──
+        if st.button("🔄 Refresh entries from sheet"):
+            load_sheet.clear()
+            get_scores.clear()
+            st.rerun()
 
         st.markdown("---")
 
