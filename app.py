@@ -11,6 +11,64 @@ st.set_page_config(page_title="The Clubhouse Pool", layout="wide", page_icon="�
 st_autorefresh(interval=300000, key="refresh")
 
 # ============================================================
+# LINK-PREVIEW META TAGS (iMessage / SMS / Slack / WhatsApp / X)
+# ------------------------------------------------------------
+# Streamlit doesn't let us touch <head> natively, so we inject Open Graph
+# and Twitter Card tags from an iframe into window.parent.document.head.
+# Most preview scrapers that hit *.streamlit.app won't execute JS, so the
+# *primary* way the preview updates for end users is by sharing the new
+# clubhousepool.golf URL (iMessage caches previews aggressively per-URL).
+# Still, some scrapers (Slack, Twitter partial, in-app previews) do run JS
+# or honor these dynamic tags, so it's worth the belt-and-suspenders.
+# ============================================================
+components.html("""
+<script>
+(function(){
+  try {
+    var d = window.parent.document;
+    function upsert(attr, key, val, tag){
+      tag = tag || 'meta';
+      var sel = tag + '[' + attr + '="' + key + '"]';
+      var el = d.querySelector(sel);
+      if (!el) {
+        el = d.createElement(tag);
+        el.setAttribute(attr, key);
+        d.head.appendChild(el);
+      }
+      el.setAttribute('content', val);
+    }
+    // Hard-set the browser tab title too (belt-and-suspenders)
+    d.title = "The Clubhouse Pool";
+
+    var TITLE = "The Clubhouse Pool";
+    var DESC  = "Weekly golf pool — $10 to enter. Pick 3 golfers, lowest combined score wins. Join your friends.";
+    var URL   = "https://clubhousepool.golf";
+    var IMG   = "https://clubhousepool.golf/~/+/media/logo-share.png"; // placeholder, fine if 404
+
+    // Open Graph (iMessage, WhatsApp, Slack, LinkedIn, Facebook)
+    upsert('property', 'og:title',       TITLE);
+    upsert('property', 'og:description', DESC);
+    upsert('property', 'og:url',         URL);
+    upsert('property', 'og:type',        'website');
+    upsert('property', 'og:site_name',   'The Clubhouse Pool');
+    upsert('property', 'og:image',       IMG);
+
+    // Twitter / X
+    upsert('name', 'twitter:card',        'summary');
+    upsert('name', 'twitter:title',       TITLE);
+    upsert('name', 'twitter:description', DESC);
+    upsert('name', 'twitter:image',       IMG);
+
+    // Standard description + apple-mobile-web-app-title (affects iOS home-screen)
+    upsert('name', 'description', DESC);
+    upsert('name', 'apple-mobile-web-app-title', TITLE);
+    upsert('name', 'application-name', TITLE);
+  } catch(e) {}
+})();
+</script>
+""", height=0)
+
+# ============================================================
 # CONFIG
 # ============================================================
 TOURNAMENT_ID = "401811942"
@@ -19,13 +77,14 @@ DAILY_PCT     = 0.15
 OVERALL_PCT   = 0.40
 
 # Public URL shared by the "Invite a Friend" button.
-# Update this once you deploy (e.g. "https://theclubhouse.streamlit.app")
-APP_URL = "https://clubhousepool.streamlit.app"
+# Now that Cloudflare is pointing clubhousepool.golf at the Streamlit app,
+# this is the friendlier URL to share in text messages.
+APP_URL = "https://clubhousepool.golf"
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1hH--Z2Ur1yN8p1R5uftC_nDF6TQz5T7Z5WJWKO6K07c/export?format=csv"
 
 # ── Admin password (move to env var before pushing to GitHub) ──
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "fairway2026")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "fairways2026")
 
 # ── Saved next to this script so settings survive restarts ──
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin_state.json")
@@ -749,6 +808,135 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
     .tourney-row span[style*="width:55px"] { display:none; }
 }
 
+/* ============================================================
+   MOBILE-FIRST PASS — 99% of users are on phones.
+   Force layout="wide" columns to stack, tighten tap targets,
+   make Tournament Leaders + share row feel native.
+   ============================================================ */
+@media (max-width: 640px) {
+    /* Force the 2/1 hero columns (and any top-level horizontal split) to
+       stack vertically on phones. layout="wide" otherwise keeps them
+       cramped side-by-side at 2:1 which is unreadable. */
+    .block-container > div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+        gap: 10px !important;
+    }
+    .block-container > div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] > div[data-testid="column"],
+    .block-container > div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+        flex: 1 1 100% !important;
+        width: 100% !important;
+        min-width: 100% !important;
+    }
+
+    /* Hero: center title + subtitle, center Join Pool button full-width */
+    .st-key-hero_left .title-block { text-align: center; }
+    .st-key-hero_left .main-title {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        font-size: clamp(2rem, 9vw, 2.6rem) !important;
+        margin: 0 auto !important;
+    }
+    .st-key-hero_left .main-subtitle { text-align: center; }
+    /* Join Pool button — full width on mobile, tall tap target */
+    .st-key-open_entry,
+    .st-key-open_entry > div {
+        width: 100% !important;
+        max-width: 100% !important;
+    }
+    .st-key-open_entry button {
+        width: 100% !important;
+        max-width: 100% !important;
+        font-size: 0.95rem !important;
+        padding: 14px 16px !important;
+        min-height: 50px !important;
+        letter-spacing: 1.5px !important;
+    }
+
+    /* Share row: center under CTA, bigger tap targets */
+    .share-inline { justify-content: center !important; gap: 6px !important; margin-top: 10px !important; }
+    .share-inline .share-link {
+        font-size: 0.72rem !important;
+        padding: 6px 10px !important;
+        min-height: 30px;
+    }
+
+    /* Prize Pot / Entries stat row — equal-width, a touch more breathing room */
+    .stat-box { padding: 12px 10px !important; }
+    .stat-value { font-size: clamp(1.6rem, 6vw, 2rem) !important; }
+
+    /* Rules / How It Works expander — bigger tap target, centered summary */
+    .st-key-rules_container details > summary,
+    .st-key-rules_container div[data-testid="stExpander"] summary {
+        padding: 16px 14px !important;
+        text-align: center;
+    }
+
+    /* Tournament Leaders — allow tee-time pill to wrap below name on tight screens */
+    .tourney-row { flex-wrap: wrap !important; padding: 9px 12px !important; gap: 6px 10px !important; }
+    .tourney-pos { font-size: 0.82rem !important; width: 20px !important; }
+    .tourney-name { font-size: 0.9rem !important; flex: 1 1 auto !important; min-width: 0 !important; }
+    .tourney-tee { font-size: 0.68rem !important; padding: 2px 7px !important; order: 3; }
+    .tourney-score-under,
+    .tourney-score-over,
+    .tourney-score-even { font-size: 0.92rem !important; flex-shrink: 0; }
+
+    /* Tee-time countdown strip — center + a little more padding */
+    .tee-strip { padding: 10px 12px !important; justify-content: center !important; }
+
+    /* Identify strip — full width, centered */
+    .id-strip { padding: 10px 12px !important; }
+    .id-strip .name { font-size: 0.95rem !important; }
+
+    /* Entry form tap targets — Streamlit inputs */
+    .entry-form-wrap input,
+    .entry-form-wrap select,
+    .entry-form-wrap textarea,
+    .entry-form-wrap [data-baseweb="select"] > div,
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stSelectbox"] > div > div {
+        min-height: 44px !important;
+        font-size: 16px !important; /* iOS won't zoom when >=16px */
+    }
+    /* Submit / Cancel buttons in the form */
+    div[data-testid="stFormSubmitButton"] button,
+    div[data-testid="stButton"] > button {
+        min-height: 44px !important;
+        font-size: 0.88rem !important;
+    }
+
+    /* Venmo CTA button — already full width, keep tall for thumbs */
+    .venmo-cta { padding: 16px 20px !important; font-size: 1rem !important; min-height: 50px; }
+
+    /* Brag/share card after entry — fit phone nicely */
+    .brag-card { padding: 18px 16px !important; max-width: 100% !important; }
+    .brag-header { font-size: 1.2rem !important; }
+    .brag-pick { padding: 7px 10px !important; font-size: 0.88rem !important; }
+
+    /* Winners grid on phones → 2 cols (already set), tighten padding */
+    .winner-card { padding: 9px 8px !important; }
+    .winner-day { font-size: 0.52rem !important; letter-spacing: 1.2px !important; margin-bottom: 4px !important; }
+    .winner-score { font-size: 0.72rem !important; }
+
+    /* Section titles on mobile — stay prominent */
+    .section-title { font-size: 1rem !important; margin-top: 6px; }
+
+    /* Floating help / admin pills — keep out of thumb zone */
+    .help-icon { bottom: 12px !important; right: 50px !important; }
+    .admin-gear { bottom: 12px !important; right: 12px !important; }
+}
+
+/* Very narrow phones — iPhone mini, older Android */
+@media (max-width: 380px) {
+    .block-container { padding: 0.6rem 0.5rem !important; }
+    .st-key-hero_left .main-title { font-size: clamp(1.7rem, 8vw, 2.1rem) !important; }
+    .stat-value { font-size: 1.4rem !important; }
+    .stat-label { font-size: 0.52rem !important; letter-spacing: 0.8px !important; }
+    .tourney-row { padding: 8px 10px !important; gap: 5px 8px !important; }
+    .tourney-name { font-size: 0.85rem !important; }
+    .tourney-tee { font-size: 0.62rem !important; padding: 1px 6px !important; }
+}
+
 .winners-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin-bottom:4px; }
 .winner-card { background:linear-gradient(135deg,#111a11,#141f14); border:1px solid #1e2e1e; border-radius:10px; padding:12px 14px; text-align:center; }
 .winner-card.has-winner { border-color:#2a4a2a; }
@@ -790,6 +978,21 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
 .tourney-score-under { color:#4ade80; font-weight:700; }
 .tourney-score-over  { color:#f87171; font-weight:700; }
 .tourney-score-even  { color:#8aad8a; }
+/* Tee-time pill — only renders when a player hasn't teed off yet. Lets you
+   glance at "1:30 PM  -13" and know they're pre-round, vs just "-13" = playing. */
+.tourney-tee {
+    color:#d4af37;
+    background:#1a1408;
+    border:1px solid #d4af3744;
+    border-radius:8px;
+    padding:2px 8px;
+    font-size:0.72rem;
+    font-weight:600;
+    font-family:'Inter','Helvetica Neue',sans-serif;
+    letter-spacing:0.3px;
+    white-space:nowrap;
+    flex-shrink:0;
+}
 
 .divider { border:none; border-top:1px solid #1e2e1e; margin:20px 0; }
 #MainMenu, header, footer { visibility:hidden; }
@@ -1050,12 +1253,159 @@ df = load_sheet()
 # ESPN DATA
 # ============================================================
 @st.cache_data(ttl=30)
+def _format_tee_time(value):
+    """Best-effort convert an ESPN tee-time value into 'h:MM AM/PM' (Eastern).
+    Accepts ISO timestamps, already-formatted clock strings, or noise.
+    Returns '' if we can't confidently identify a real tee time."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    up = s.upper()
+    # Reject obvious non-times: hole numbers, "F", "CUT", "WD", etc.
+    if up in ("F", "CUT", "WD", "DQ", "DNS", "MC", "WDR", "RTD", "E"):
+        return ""
+    if up.startswith("F-") or up.startswith("F "):
+        return ""
+    # Reject a bare hole number (1-18)
+    try:
+        n = int(up)
+        if 0 <= n <= 18:
+            return ""
+    except Exception:
+        pass
+    # Reject a bare score like "-13" or "+3"
+    try:
+        if s.startswith("-") or s.startswith("+"):
+            int(s)
+            return ""
+    except Exception:
+        pass
+
+    import re as _re
+    # Already human-readable? e.g. "1:30 PM", "Starts 10:05 AM", "Tee: 10:05 AM"
+    m = _re.search(r"(\d{1,2}:\d{2})\s*(AM|PM|am|pm)", s)
+    if m:
+        return f"{m.group(1)} {m.group(2).upper()}"
+
+    # ISO timestamp path (e.g. "2026-04-16T18:05Z", "2026-04-16T14:05:00-04:00")
+    if "T" in s:
+        try:
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            iso = s.replace("Z", "+00:00")
+            dt = _dt.fromisoformat(iso)
+            # Convert to Eastern Time (EDT, UTC-4). Good enough for PGA broadcasts.
+            try:
+                dt = dt.astimezone(_tz(_td(hours=-4)))
+            except Exception:
+                pass
+            h12 = dt.hour % 12 or 12
+            ampm = "AM" if dt.hour < 12 else "PM"
+            return f"{h12}:{dt.minute:02d} {ampm}"
+        except Exception:
+            pass
+    return ""
+
+def _extract_tee_time(p):
+    """Best-effort tee-time extraction for a player. We don't gate by status
+    state (ESPN's state values vary by tournament day), we just look for a
+    time-like field anywhere sensible in the player payload. If the player
+    is already in-progress, ESPN usually returns a hole number or 'F' in
+    displayValue and _format_tee_time rejects those."""
+    try:
+        status = p.get("status") or {}
+        stype  = (status.get("type") or {})
+        # Priority-ordered candidate paths. First real time wins.
+        candidates = [
+            p.get("teeTime"),
+            p.get("startTime"),
+            status.get("teeTime"),
+            status.get("startTime"),
+            status.get("displayValue"),
+            stype.get("detail"),
+            stype.get("shortDetail"),
+            stype.get("description"),
+        ]
+        # Per-round linescore teeTimes
+        try:
+            for row in (p.get("linescores") or []):
+                if isinstance(row, dict):
+                    for key in ("teeTime", "startTime", "time"):
+                        v = row.get(key)
+                        if v: candidates.append(v)
+        except Exception:
+            pass
+        for c in candidates:
+            fmt = _format_tee_time(c)
+            if fmt:
+                return fmt
+    except Exception:
+        pass
+    return ""
+
+def _collect_tee_fields(p):
+    """Debug helper: return a dict of every candidate field we inspected
+    for a given player, so the admin panel can show exactly what ESPN sent."""
+    out = {}
+    try:
+        status = p.get("status") or {}
+        stype  = (status.get("type") or {})
+        out["status.type.state"]       = stype.get("state")
+        out["status.displayValue"]     = status.get("displayValue")
+        out["status.type.detail"]      = stype.get("detail")
+        out["status.type.shortDetail"] = stype.get("shortDetail")
+        out["status.type.description"] = stype.get("description")
+        out["teeTime (top)"]           = p.get("teeTime")
+        out["status.teeTime"]          = status.get("teeTime")
+        out["status.startTime"]        = status.get("startTime")
+        ls = p.get("linescores") or []
+        for idx, row in enumerate(ls, 1):
+            if isinstance(row, dict):
+                for key in ("teeTime", "startTime", "time"):
+                    if row.get(key) is not None:
+                        out[f"linescores[{idx}].{key}"] = row.get(key)
+    except Exception:
+        pass
+    return out
+
+def _fetch_tee_times_leaderboard():
+    """Secondary ESPN endpoint — the leaderboard API usually has richer per-player
+    data including tee times, where the scoreboard endpoint doesn't. Returns a
+    (tee_times_dict, raw_players_list) tuple. Both empty on failure."""
+    try:
+        url  = f"https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?event={TOURNAMENT_ID}"
+        data = requests.get(url, timeout=10).json()
+        comps = []
+        # Try several paths — ESPN's response schema varies
+        try:    comps = data["events"][0]["competitions"][0]["competitors"]
+        except: pass
+        if not comps:
+            try:    comps = data["competitions"][0]["competitors"]
+            except: pass
+        if not comps:
+            try:    comps = data["competitors"]
+            except: pass
+        tt, raw_players = {}, []
+        for p in comps:
+            try:
+                name = p["athlete"]["displayName"]
+                raw_players.append(p)
+                fmt = _extract_tee_time(p)
+                if fmt:
+                    tt[name] = fmt
+            except Exception:
+                continue
+        return tt, raw_players
+    except Exception:
+        return {}, []
+
 def get_scores():
     try:
         url  = f"https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?tournamentId={TOURNAMENT_ID}"
         data = requests.get(url, timeout=10).json()
         players = data["events"][0]["competitions"][0]["competitors"]
-        score_map, leaderboard = {}, []
+        score_map, leaderboard, tee_times, tee_debug = {}, [], {}, {}
         for p in players:
             name = p["athlete"]["displayName"]
             raw  = p.get("score","E")
@@ -1063,11 +1413,36 @@ def get_scores():
             try:   val = 0 if str(raw) in ("E","") else int(raw)
             except: val = 0
             score_map[name] = val
-        return score_map, leaderboard, data
+            tt = _extract_tee_time(p)
+            if tt:
+                tee_times[name] = tt
+            # Keep raw tee-time-relevant fields for admin debugging
+            tee_debug[name] = _collect_tee_fields(p)
+        # Fallback — try the leaderboard endpoint for any missing tee times
+        lb_tt, lb_players = _fetch_tee_times_leaderboard()
+        for n, v in lb_tt.items():
+            if n not in tee_times:
+                tee_times[n] = v
+        # Merge tee debug data from leaderboard endpoint
+        for lp in lb_players:
+            try:
+                n = lp["athlete"]["displayName"]
+                existing = tee_debug.get(n, {}) or {}
+                extras = _collect_tee_fields(lp)
+                # Prefix leaderboard fields so we know which endpoint they came from
+                for k, v in extras.items():
+                    existing[f"[lb] {k}"] = v
+                tee_debug[n] = existing
+            except Exception:
+                continue
+        # Also keep the first leaderboard-endpoint raw player around so admin
+        # can inspect the full JSON if needed
+        first_raw = lb_players[0] if lb_players else (players[0] if players else {})
+        return score_map, leaderboard, data, tee_times, tee_debug, first_raw
     except:
-        return {}, [], {}
+        return {}, [], {}, {}, {}, {}
 
-score_map, espn_lb, raw_data = get_scores()
+score_map, espn_lb, raw_data, tee_times, tee_debug, first_raw_player = get_scores()
 
 # Apply admin score overrides on top of ESPN data
 for player, override_val in admin["score_overrides"].items():
@@ -1964,19 +2339,28 @@ if espn_lb:
             val = admin["score_overrides"][name]
         sc_cls  = "tourney-score-under" if val<0 else "tourney-score-over" if val>0 else "tourney-score-even"
         ov_flag = " ✎" if name in admin["score_overrides"] else ""
-        lb_html += f"""
-        <div class="tourney-row">
-            <span class="tourney-pos">{i}</span>
-            <span class="tourney-name">{name}{ov_flag}</span>
-            <span class="{sc_cls}">{fmt_score(val)}</span>
-        </div>"""
+        # Tee-time pill: only shows when the player hasn't teed off yet.
+        # When they're playing or done, it's empty and the score reads solo.
+        tt = tee_times.get(name, "")
+        tt_html = f'<span class="tourney-tee">⏰ {tt}</span>' if tt else ''
+        # Keep every HTML fragment flush-left with no newlines between tags —
+        # any leading whitespace inside st.markdown gets interpreted as a
+        # markdown code block and the raw HTML leaks to the page.
+        lb_html += (
+            f'<div class="tourney-row">'
+            f'<span class="tourney-pos">{i}</span>'
+            f'<span class="tourney-name">{name}{ov_flag}</span>'
+            f'{tt_html}'
+            f'<span class="{sc_cls}">{fmt_score(val)}</span>'
+            f'</div>'
+        )
     st.markdown(f'<div class="tourney-container">{lb_html}</div>', unsafe_allow_html=True)
 else:
     st.markdown('<div style="color:#4a6b4a;font-size:0.9rem;padding:12px 0;">Live scores temporarily unavailable.</div>', unsafe_allow_html=True)
 
 # ============================================================
 # ADMIN PANEL — hidden unless URL contains ?admin=1
-# Bookmark  https://theclubhouse.streamlit.app/?admin=1  for yourself.
+# Bookmark  https://clubhousepool.streamlit.app/?admin=1  for yourself.
 # Everyone else just sees a clean page with no sign the admin controls exist.
 # ============================================================
 _admin_visible = False
@@ -2179,6 +2563,34 @@ if _admin_visible:
                     admin["rank_snapshot_time"] = ""
                     save_state(admin)
                     st.rerun()
+
+            # ── Tee-time debug (so we can see what ESPN actually returns) ──
+            with st.expander("⏰ Tee-time debug", expanded=False):
+                st.caption("Shows which ESPN fields exist for each leaderboard player. "
+                           "Fields tagged [lb] come from the secondary /leaderboard endpoint. "
+                           "If a tee time is visible in the raw JSON below but NOT in the "
+                           "'Extracted tee times' line, copy the JSON to me and I'll wire "
+                           "the right field in.")
+                st.markdown(f"**Extracted tee times ({len(tee_times)})**: `{tee_times}`")
+                st.markdown("---")
+                # Show the first 10 leaderboard players' raw tee-candidate fields
+                for name, _ in espn_lb[:10]:
+                    fields = tee_debug.get(name, {})
+                    # Only keep non-null fields to reduce noise
+                    non_null = {k: v for k, v in fields.items() if v not in (None, "", [])}
+                    st.markdown(f"**{name}**")
+                    if non_null:
+                        for k, v in non_null.items():
+                            st.caption(f"  • `{k}` = `{v}`")
+                    else:
+                        st.caption("  _(all tee-candidate fields empty)_")
+                st.markdown("---")
+                st.markdown("**Full raw JSON for the first player** (every field ESPN sends):")
+                try:
+                    import json as _json
+                    st.code(_json.dumps(first_raw_player, indent=2, default=str)[:6000], language="json")
+                except Exception as _e:
+                    st.caption(f"(JSON dump failed: {_e})")
 
             # ── ESPN debug data ──
             with st.expander("🔍 ESPN debug data", expanded=False):
