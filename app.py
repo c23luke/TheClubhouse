@@ -20,12 +20,12 @@ OVERALL_PCT   = 0.40
 
 # Public URL shared by the "Invite a Friend" button.
 # Update this once you deploy (e.g. "https://theclubhouse.streamlit.app")
-APP_URL = "https://theclubhouse.streamlit.app"
+APP_URL = "https://clubhousepool.streamlit.app"
 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1hH--Z2Ur1yN8p1R5uftC_nDF6TQz5T7Z5WJWKO6K07c/export?format=csv"
 
 # ── Admin password (move to env var before pushing to GitHub) ──
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "fairway2025")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "fairway2026")
 
 # ── Saved next to this script so settings survive restarts ──
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin_state.json")
