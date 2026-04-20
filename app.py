@@ -215,6 +215,15 @@ DEFAULT_STATE = {
     "rank_snapshot":       {},   # {email_or_venmo: rank_int} — captured by admin for position-arrow diffs
     "rank_snapshot_time":  "",   # ISO timestamp of last snapshot
     "tournament_start":    "",   # ISO timestamp — used for tee-time countdown strip
+    # Payment tracking — entry_key ("venmo|timestamp") → True means paid.
+    # Unpaid entries render with a pending pill and don't count toward the pot.
+    "paid_entries":        {},
+    # ── Private Leagues ──
+    # leagues: {CODE: {"name": str, "fee": int, "commissioner_email": str,
+    #                  "created_at": iso_str, "members": [email_lower, ...]}}
+    # league_memberships: {email_lower: CODE}  — one league per email at a time
+    "leagues":             {},
+    "league_memberships":  {},
 }
 
 def load_state():
@@ -237,6 +246,107 @@ if "admin_state" not in st.session_state:
     st.session_state.admin_state = load_state()
 
 admin = st.session_state.admin_state
+
+# ============================================================
+# PRIVATE LEAGUES  (helpers + URL param parsing)
+# ------------------------------------------------------------
+# A private league is a mini-pool inside the main app.  Anyone can create
+# one (self-serve), gets back a unique 6-char code, and shares the link
+# `clubhousepool.golf/?league=CODE` with friends. Anyone who submits an
+# entry while that URL is active is auto-added as a member of that league.
+# The leaderboard, pot, and payouts all scope to the league when ?league=
+# is present; otherwise the public pool renders as normal.
+# ============================================================
+import random as _rnd_leagues
+
+# Ambiguous glyphs stripped (0/O, 1/I/L) for clean text-message sharing.
+_LEAGUE_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+def _generate_league_code(existing_codes):
+    """Return a 6-char uppercase code that isn't already in use."""
+    for _ in range(200):
+        code = "".join(_rnd_leagues.choice(_LEAGUE_CODE_ALPHABET) for _ in range(6))
+        if code not in existing_codes:
+            return code
+    # Extremely unlikely to hit — fall back to longer code
+    return "".join(_rnd_leagues.choice(_LEAGUE_CODE_ALPHABET) for _ in range(8))
+
+def _normalize_league_code(raw):
+    """Clean up a user-typed or URL-pasted league code → uppercase A-Z0-9."""
+    if not raw:
+        return ""
+    return "".join(c for c in str(raw).upper() if c.isalnum())[:12]
+
+# ── Parse ?league=CODE URL param (early, so every subsequent section knows) ──
+_current_league_code = ""
+try:
+    _qp_lg = st.query_params
+    _lg_raw = _qp_lg.get("league", "")
+    if isinstance(_lg_raw, list):
+        _lg_raw = _lg_raw[0] if _lg_raw else ""
+    _current_league_code = _normalize_league_code(_lg_raw)
+except Exception:
+    try:
+        _qp_lg = st.experimental_get_query_params()
+        _current_league_code = _normalize_league_code(_qp_lg.get("league", [""])[0])
+    except Exception:
+        _current_league_code = ""
+
+# Resolve to the actual league record (or None if code is unknown / empty).
+_leagues_store = admin.get("leagues", {}) or {}
+current_league = _leagues_store.get(_current_league_code) if _current_league_code else None
+# If someone visits with a bogus code, treat as public pool but remember the code
+# so we can surface a friendly "League not found" message inline.
+current_league_code = _current_league_code if current_league else ""
+_league_code_attempted = _current_league_code  # for "not found" messaging
+
+# Helpers the rest of the app uses to reason about league membership.
+def _membership_map():
+    return admin.get("league_memberships", {}) or {}
+
+def _league_emails(code):
+    """All emails that are members of this league (lowercased)."""
+    if not code:
+        return set()
+    return {e.lower().strip() for e, c in _membership_map().items() if c == code}
+
+def _email_league(email):
+    """Which league (if any) does this email belong to? Returns code or ''."""
+    if not email:
+        return ""
+    return _membership_map().get(email.lower().strip(), "")
+
+def _join_league(email, code):
+    """Record email → league membership. One league per email (last wins)."""
+    if not email or not code:
+        return
+    e = email.lower().strip()
+    c = _normalize_league_code(code)
+    if c not in _leagues_store:
+        return
+    admin.setdefault("league_memberships", {})[e] = c
+    # Also append to league's own members list (best-effort, de-duped)
+    lg = admin["leagues"].get(c)
+    if lg is not None:
+        _members = lg.setdefault("members", [])
+        if e not in _members:
+            _members.append(e)
+    save_state(admin)
+
+def _league_entry_fee(code):
+    """Return the per-entry $ fee for this league, or ENTRY_FEE for public pool."""
+    if not code:
+        return ENTRY_FEE
+    lg = _leagues_store.get(code)
+    if not lg:
+        return ENTRY_FEE
+    try:
+        return int(lg.get("fee", ENTRY_FEE))
+    except Exception:
+        return ENTRY_FEE
+
+# The fee that applies to THIS page view — league fee when scoped, else public.
+ENTRY_FEE_ACTIVE = _league_entry_fee(current_league_code)
 
 # ============================================================
 # STYLES
@@ -274,6 +384,17 @@ html, body, [class*="css"] {
     margin: 0;
 }
 .main-subtitle { font-size:0.75rem; color:#4a6b4a; letter-spacing:3px; text-transform:uppercase; margin-top:6px; }
+.main-subtitle .subtitle-tourney {
+    color: #d4af37;
+    font-weight: 700;
+    letter-spacing: 2px;
+    margin-left: 6px;
+}
+.main-subtitle .subtitle-sep {
+    color: #2a3d2a;
+    margin: 0 6px;
+    font-weight: 400;
+}
 
 .stat-box {
     background: linear-gradient(135deg,#141f14,#1a2a1a);
@@ -286,6 +407,100 @@ html, body, [class*="css"] {
     font-family:'Playfair Display',serif; font-size:clamp(1rem,3vw,1.3rem);
     color:#fff; letter-spacing:1px; margin-bottom:12px;
     border-left:3px solid #fff; padding-left:12px;
+}
+.section-title .section-sub {
+    font-size:0.72rem; font-weight:500; color:#d4af37cc;
+    letter-spacing:1.5px; text-transform:uppercase;
+    margin-left:4px;
+}
+
+/* ── Private League banner (shown when ?league=CODE) ── */
+.league-banner {
+    background: linear-gradient(135deg, #1a2a1a, #1f3a2a);
+    border: 1px solid #4ade8066;
+    border-radius: 14px;
+    padding: 12px 16px;
+    margin: 0 0 14px 0;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+    box-shadow: 0 0 22px #4ade8022;
+}
+.league-banner .lb-left { display:flex; flex-direction:column; gap:2px; }
+.league-banner .lb-eyebrow {
+    font-size: 0.6rem; color:#4ade80; letter-spacing: 2.5px;
+    text-transform: uppercase; font-weight: 700;
+}
+.league-banner .lb-name {
+    font-family:'Playfair Display', serif; font-size: 1.15rem;
+    color:#fff; font-weight: 700; line-height: 1.1;
+}
+.league-banner .lb-meta {
+    display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+    font-size:0.72rem; color:#a7c9a7; letter-spacing:1px;
+    text-transform:uppercase;
+}
+.league-banner .lb-meta .lb-dot { color:#2a3d2a; }
+.league-banner .lb-code-box {
+    background:#0c1a0c; border:1px solid #2a3d2a;
+    border-radius: 8px; padding: 6px 10px;
+    font-family: 'Courier New', monospace; color:#d4af37;
+    font-weight: 700; letter-spacing: 3px; font-size: 0.95rem;
+}
+
+/* "Not found" warning for a bogus ?league= code */
+.league-not-found {
+    background: #2a1a10; border: 1px solid #a04a2a;
+    border-radius: 10px; padding: 10px 14px; margin: 0 0 12px 0;
+    color: #ffb991; font-size: 0.82rem;
+}
+
+/* Small "viewing public pool" return link */
+.league-return-link {
+    font-size: 0.7rem; color:#6b8a6b; text-decoration: none;
+    padding: 4px 10px; border-radius: 8px;
+    border: 1px solid #2a3d2a; background: transparent;
+    transition: all 0.15s ease; white-space: nowrap;
+}
+.league-return-link:hover { color:#fff; border-color:#4a6b4a; }
+
+/* ── Create-a-League CTA (sits below Join Pool) ── */
+.create-league-cta {
+    font-size: 0.75rem; color:#8ab08a; text-align: center;
+    margin: 6px 0 0 0; letter-spacing: 0.5px;
+}
+.create-league-cta strong { color:#4ade80; font-weight:600; }
+
+/* Shareable invite link box (after creating a league) */
+.league-share-box {
+    background: linear-gradient(135deg, #0f1a0f, #141f14);
+    border: 1px solid #4ade8055;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-top: 12px;
+}
+.league-share-box .ls-title {
+    font-family:'Playfair Display', serif; color:#fff;
+    font-size: 1rem; margin-bottom: 6px;
+}
+.league-share-box .ls-code {
+    font-family: 'Courier New', monospace; color:#d4af37;
+    font-size: 1.3rem; font-weight: 700; letter-spacing: 4px;
+    display: inline-block; padding: 6px 14px;
+    background: #0a0f0a; border-radius: 8px; border: 1px solid #2a3d2a;
+    margin: 4px 0 8px 0;
+}
+.league-share-box .ls-url {
+    display: block; color:#4ade80; font-size:0.85rem;
+    word-break: break-all; background: #0a0f0a;
+    padding: 8px 12px; border-radius: 8px;
+    border: 1px solid #2a3d2a; margin-top: 6px;
+}
+.league-share-box .ls-hint { font-size: 0.72rem; color:#6b8a6b; margin-top:8px; }
+
+@media (max-width: 640px) {
+    .league-banner { flex-direction: column; align-items: flex-start; }
+    .league-banner .lb-code-box { align-self: flex-start; }
+    .league-banner .lb-meta { font-size: 0.68rem; }
 }
 
 .entry-card {
@@ -303,6 +518,35 @@ html, body, [class*="css"] {
     padding:1px 6px; border-radius:8px; letter-spacing:1.5px;
     margin-left:6px; text-transform:uppercase; vertical-align:middle;
     display:inline-block;
+}
+/* Pending payment pill — entry shown but not counted toward pot */
+.pending-pill {
+    background:#2a1e0d; color:#f5c872;
+    border:1px solid #d4af3766;
+    font-size:0.55rem; font-weight:800;
+    padding:1px 6px; border-radius:8px; letter-spacing:1.2px;
+    margin-left:6px; text-transform:uppercase; vertical-align:middle;
+    display:inline-block;
+}
+.entry-card.pending {
+    opacity:0.78;
+    background:repeating-linear-gradient(135deg,#111a11,#111a11 8px,#141f14 8px,#141f14 16px);
+}
+.entry-card.pending:hover { opacity:0.95; }
+/* Cut pill shown next to golfer names who missed the cut */
+.cut-pill {
+    background:#2a0d0d; color:#ff7070;
+    border:1px solid #a33;
+    font-size:0.52rem; font-weight:800;
+    padding:1px 5px; border-radius:6px; letter-spacing:1.2px;
+    margin-left:6px; text-transform:uppercase;
+    display:inline-block; vertical-align:middle;
+}
+/* Little sub-label under the Entries stat showing paid/pending breakdown */
+.stat-sub {
+    font-size:0.55rem; color:#d4af37cc;
+    text-transform:uppercase; letter-spacing:1.2px;
+    margin-top:2px; font-weight:600;
 }
 .rank-badge { font-family:'Playfair Display',serif; font-size:1.2rem; font-weight:900; color:#4a6b4a; width:32px; text-align:center; flex-shrink:0; }
 .rank-badge.top3 { color:#fff; }
@@ -346,6 +590,26 @@ html, body, [class*="css"] {
 @media (max-width: 640px) {
     .admin-gear { bottom: 12px; left: 12px; width: 32px; height: 32px; font-size: 13px; opacity: 0.7; }
 }
+
+/* Admin panel group banners — visually separate each lifecycle phase */
+.admin-group {
+    display:flex; align-items:center; justify-content:space-between;
+    margin:22px 0 10px 0; padding:10px 14px;
+    border-radius:8px; border-left:4px solid;
+    font-family:'Playfair Display', serif;
+}
+.admin-group .g-title { font-size:1.05rem; font-weight:700; letter-spacing:0.5px; color:#fff; }
+.admin-group .g-when  { font-size:0.72rem; color:#c8d8c8; letter-spacing:1.5px; text-transform:uppercase; opacity:0.85; }
+.admin-group.setup  { background:linear-gradient(90deg,#1a2a1a,#0d160d); border-color:#d4af37; }
+.admin-group.during { background:linear-gradient(90deg,#0d1a1f,#0d160d); border-color:#4ade80; }
+.admin-group.wrap   { background:linear-gradient(90deg,#1a0d1a,#0d160d); border-color:#a78bfa; }
+.admin-group.debug  { background:linear-gradient(90deg,#1a1515,#0d160d); border-color:#6b6b6b; }
+.admin-phase-hint {
+    background:#0f1e0f; border:1px solid #2a3d2a; border-radius:8px;
+    padding:10px 14px; margin:8px 0 18px 0; color:#c8d8c8; font-size:0.88rem;
+    line-height:1.5;
+}
+.admin-phase-hint strong { color:#d4af37; }
 
 /* Floating "Rules" pill — clearly visible, bottom-right, next to admin gear */
 .help-icon {
@@ -489,7 +753,8 @@ html, body, [class*="css"] {
 .picks-area { flex:1; display:flex; gap:6px; flex-wrap:wrap; align-content:center; min-width:0; }
 .pick-chip {
     background:#0d160d; border:1px solid #2a3d2a; border-radius:6px;
-    padding:3px 8px; font-size:0.74rem; color:#8aad8a; white-space:nowrap;
+    padding:4px 10px; font-size:0.95rem; color:#c8d8c8; white-space:nowrap;
+    font-weight:500;
 }
 .pick-chip.best { border-color:#ffffff33; background:#1a2a1a; }
 .pick-score-under { color:#4ade80; font-weight:600; }
@@ -786,8 +1051,8 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
         background: transparent !important;
         border: none !important;
         border-radius: 0 !important;
-        padding: 3px 2px !important;
-        font-size: 0.82rem !important;
+        padding: 5px 2px !important;
+        font-size: 1.05rem !important;
         white-space: normal !important;
         display: flex !important;
         justify-content: space-between !important;
@@ -802,15 +1067,16 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
     .pick-chip-name {
         flex: 1 1 auto;
         min-width: 0;
-        color: #c8d8c8 !important;
-        font-weight: 400;
+        color: #e0ece0 !important;
+        font-weight: 600 !important;
+        font-size: 1.05rem !important;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
     .pick-chip.best .pick-chip-name {
         color: #fff !important;
-        font-weight: 600;
+        font-weight: 700 !important;
     }
     .pick-chip-star { margin-right: 4px; }
     .pick-chip-score,
@@ -819,7 +1085,7 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
     .pick-chip .pick-score-even {
         flex-shrink: 0 !important;
         margin-left: 10px !important;
-        font-size: 0.88rem !important;
+        font-size: 1.05rem !important;
         font-weight: 700 !important;
         font-variant-numeric: tabular-nums;
     }
@@ -891,8 +1157,9 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
 @media (max-width: 380px) {
     .main-title { font-size:1.6rem !important; }
     .entry-card { padding: 7px 10px !important; }
-    .pick-chip { font-size: 0.78rem !important; padding: 2px 2px !important; }
-    .pick-chip-score { font-size: 0.82rem !important; }
+    .pick-chip { font-size: 1.0rem !important; padding: 4px 2px !important; }
+    .pick-chip-name { font-size: 1.0rem !important; }
+    .pick-chip-score { font-size: 1.0rem !important; }
     .day-chip .day-lbl { font-size:0.5rem !important; }
     .day-chip .day-val { font-size:0.68rem !important; }
     .winners-grid { gap:5px; }
@@ -1067,6 +1334,93 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
     50%     { opacity:0.85; box-shadow:0 0 0 4px #3d95ce00; }
 }
 .winner-tbd { font-family:'Playfair Display',serif; font-size:1rem; color:#2a4a2a; }
+
+/* ───────── Hall of Fame: Last Champion card (above the table) ───────── */
+.last-champ {
+    background: linear-gradient(135deg, #1a1408 0%, #2a1e0d 50%, #1a1408 100%);
+    border: 1px solid rgba(212,175,55,0.45);
+    border-radius: 12px;
+    padding: 14px 18px;
+    margin: 4px 0 14px 0;
+    position: relative;
+    overflow: hidden;
+}
+.last-champ::before {
+    content: "";
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at top right, rgba(212,175,55,0.18), transparent 60%);
+    pointer-events: none;
+}
+.last-champ-label {
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 2px;
+    color: #d4af37; text-transform: uppercase; margin-bottom: 4px;
+    position: relative;
+}
+.last-champ-name {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(1.4rem, 4vw, 1.8rem);
+    font-weight: 700; color: #fff; line-height: 1.1;
+    position: relative;
+}
+.last-champ-meta {
+    font-size: 0.78rem; color: #c8d8c8;
+    margin-top: 6px; letter-spacing: 0.2px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    position: relative;
+}
+.last-champ-score {
+    background: rgba(255,255,255,0.08);
+    color: #fff; font-weight: 700;
+    padding: 2px 8px; border-radius: 6px;
+    font-size: 0.78rem;
+}
+.last-champ-winnings {
+    color: #4ade80; font-weight: 700;
+    background: rgba(74,222,128,0.1);
+    padding: 2px 8px; border-radius: 6px;
+    font-size: 0.78rem;
+}
+.hof-subhead {
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 2px;
+    color: #8aad8a; text-transform: uppercase;
+    margin: 2px 0 6px 2px;
+}
+
+/* ───────── Hall of Fame: cold-start "In the running" preview ───────── */
+.hof-preview {
+    background: linear-gradient(135deg, #0d160d, #141f14);
+    border: 1px solid #2a3d2a;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin: 4px 0 8px 0;
+}
+.hof-preview-label {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 1.8px;
+    color: #d4af37; text-transform: uppercase;
+    margin-bottom: 10px;
+}
+.hof-preview-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 4px; border-bottom: 1px solid #1a2a1a;
+}
+.hof-preview-row:last-of-type { border-bottom: none; }
+.hof-preview-rank {
+    font-size: 1.1rem; width: 28px; flex-shrink: 0;
+}
+.hof-preview-name {
+    flex: 1; color: #e8ede8; font-weight: 600;
+    font-size: 0.95rem;
+}
+.hof-preview-score {
+    font-weight: 700; font-size: 0.95rem;
+    font-family: 'Playfair Display', serif;
+}
+.hof-preview-footer {
+    margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid #1e2e1e;
+    font-size: 0.72rem; color: #8aad8a; font-style: italic;
+    text-align: center; letter-spacing: 0.3px;
+}
 
 .tourney-container { background:#111a11; border:1px solid #1e2e1e; border-radius:12px; overflow:hidden; }
 .tourney-row { display:flex; align-items:center; gap:14px; padding:10px 18px; border-bottom:1px solid #1a2a1a; font-size:0.88rem; }
@@ -1358,6 +1712,73 @@ df = load_sheet()
 # ESPN DATA
 # ============================================================
 @st.cache_data(ttl=30)
+def _parse_tee_time_to_dt(value):
+    """Parse any of ESPN's tee-time encodings into a timezone-aware UTC datetime.
+    Returns None if the value doesn't look like a tee time."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    up = s.upper()
+    # Reject obvious non-times
+    if up in ("F", "CUT", "WD", "DQ", "DNS", "MC", "WDR", "RTD", "E"):
+        return None
+    if up.startswith("F-") or up.startswith("F "):
+        return None
+    try:
+        n = int(up)
+        if 0 <= n <= 18:
+            return None
+    except Exception:
+        pass
+    try:
+        if s.startswith("-") or s.startswith("+"):
+            int(s)
+            return None
+    except Exception:
+        pass
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    # ISO (e.g. "2026-04-16T18:05Z")
+    if "T" in s:
+        try:
+            iso = s.replace("Z", "+00:00")
+            dt = _dt.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            return dt
+        except Exception:
+            pass
+    # Java Date.toString() — e.g. "Thu Apr 16 13:50:00 PDT 2026"
+    import re as _re
+    m = _re.match(
+        r"^([A-Za-z]{3})\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})\s+([A-Z]{2,4})\s+(\d{4})$",
+        s,
+    )
+    if m:
+        months = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,
+                  "Jul":7,"Aug":8,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
+        tz_offsets = {
+            "UTC": 0, "GMT": 0,
+            "EST": -5, "EDT": -4,
+            "CST": -6, "CDT": -5,
+            "MST": -7, "MDT": -6,
+            "PST": -8, "PDT": -7,
+            "HST": -10, "AKST": -9, "AKDT": -8,
+        }
+        try:
+            mon = months[m.group(2)]
+            day = int(m.group(3))
+            hh, mm, ss = int(m.group(4)), int(m.group(5)), int(m.group(6))
+            tzname = m.group(7)
+            year = int(m.group(8))
+            off = tz_offsets.get(tzname, 0)
+            dt = _dt(year, mon, day, hh, mm, ss, tzinfo=_tz(_td(hours=off)))
+            return dt.astimezone(_tz.utc)
+        except Exception:
+            pass
+    return None
+
 def _format_tee_time(value):
     """Best-effort convert an ESPN tee-time value into 'h:MM AM/PM' (Eastern).
     Accepts ISO timestamps, already-formatted clock strings, or noise.
@@ -1367,62 +1788,35 @@ def _format_tee_time(value):
     s = str(value).strip()
     if not s:
         return ""
-    up = s.upper()
-    # Reject obvious non-times: hole numbers, "F", "CUT", "WD", etc.
-    if up in ("F", "CUT", "WD", "DQ", "DNS", "MC", "WDR", "RTD", "E"):
-        return ""
-    if up.startswith("F-") or up.startswith("F "):
-        return ""
-    # Reject a bare hole number (1-18)
-    try:
-        n = int(up)
-        if 0 <= n <= 18:
-            return ""
-    except Exception:
-        pass
-    # Reject a bare score like "-13" or "+3"
-    try:
-        if s.startswith("-") or s.startswith("+"):
-            int(s)
-            return ""
-    except Exception:
-        pass
-
     import re as _re
     # Already human-readable? e.g. "1:30 PM", "Starts 10:05 AM", "Tee: 10:05 AM"
     m = _re.search(r"(\d{1,2}:\d{2})\s*(AM|PM|am|pm)", s)
     if m:
         return f"{m.group(1)} {m.group(2).upper()}"
-
-    # ISO timestamp path (e.g. "2026-04-16T18:05Z", "2026-04-16T14:05:00-04:00")
-    if "T" in s:
+    # Try full parse (ISO or Java Date)
+    dt = _parse_tee_time_to_dt(s)
+    if dt is not None:
+        from datetime import timezone as _tz, timedelta as _td
         try:
-            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-            iso = s.replace("Z", "+00:00")
-            dt = _dt.fromisoformat(iso)
-            # Convert to Eastern Time (EDT, UTC-4). Good enough for PGA broadcasts.
-            try:
-                dt = dt.astimezone(_tz(_td(hours=-4)))
-            except Exception:
-                pass
-            h12 = dt.hour % 12 or 12
-            ampm = "AM" if dt.hour < 12 else "PM"
-            return f"{h12}:{dt.minute:02d} {ampm}"
+            dt = dt.astimezone(_tz(_td(hours=-4)))   # Eastern
         except Exception:
             pass
+        h12 = dt.hour % 12 or 12
+        ampm = "AM" if dt.hour < 12 else "PM"
+        return f"{h12}:{dt.minute:02d} {ampm}"
     return ""
 
 def _extract_tee_time(p):
-    """Best-effort tee-time extraction for a player. We don't gate by status
-    state (ESPN's state values vary by tournament day), we just look for a
-    time-like field anywhere sensible in the player payload. If the player
-    is already in-progress, ESPN usually returns a hole number or 'F' in
-    displayValue and _format_tee_time rejects those."""
+    """Best-effort tee-time extraction for a player. Looks in the usual
+    top-level fields plus digs into each round's statistics.categories.stats
+    (ESPN buries tee times in a Java Date string like 'Thu Apr 16 13:50:00 PDT 2026').
+    Returns the next UPCOMING tee time (earliest future) if possible, else the
+    first parseable one. Returns '' if nothing usable is found."""
+    from datetime import datetime as _dt, timezone as _tz
     try:
         status = p.get("status") or {}
         stype  = (status.get("type") or {})
-        # Priority-ordered candidate paths. First real time wins.
-        candidates = [
+        raw_candidates = [
             p.get("teeTime"),
             p.get("startTime"),
             status.get("teeTime"),
@@ -1432,19 +1826,40 @@ def _extract_tee_time(p):
             stype.get("shortDetail"),
             stype.get("description"),
         ]
-        # Per-round linescore teeTimes
+        # Linescore-level tee time fields + buried stats
         try:
             for row in (p.get("linescores") or []):
-                if isinstance(row, dict):
-                    for key in ("teeTime", "startTime", "time"):
-                        v = row.get(key)
-                        if v: candidates.append(v)
+                if not isinstance(row, dict):
+                    continue
+                for key in ("teeTime", "startTime", "time"):
+                    v = row.get(key)
+                    if v: raw_candidates.append(v)
+                # Dig into statistics.categories.stats (ESPN puts a Java-style
+                # start datetime in a stat slot, e.g. "Thu Apr 16 13:50:00 PDT 2026").
+                try:
+                    cats = ((row.get("statistics") or {}).get("categories") or [])
+                    for cat in cats:
+                        for stat in (cat.get("stats") or []):
+                            if isinstance(stat, dict):
+                                raw_candidates.append(stat.get("displayValue"))
+                                raw_candidates.append(stat.get("value"))
+                except Exception:
+                    continue
         except Exception:
             pass
-        for c in candidates:
-            fmt = _format_tee_time(c)
-            if fmt:
-                return fmt
+        # Parse all candidates; only return future tee times (past ones
+        # are irrelevant once a round is underway).
+        now_utc = _dt.now(_tz.utc)
+        futures = []
+        for c in raw_candidates:
+            dt = _parse_tee_time_to_dt(c)
+            if dt is None:
+                continue
+            if dt >= now_utc:
+                futures.append(dt)
+        if futures:
+            best = min(futures)             # earliest upcoming
+            return _format_tee_time(best.isoformat())
     except Exception:
         pass
     return ""
@@ -1505,12 +1920,42 @@ def _fetch_tee_times_leaderboard():
     except Exception:
         return {}, []
 
+def _is_cut(p):
+    """Detect if a player has missed the cut / withdrawn / been DQ'd based on ESPN status fields.
+    Returns True for MC/CUT/WD/DQ. Returns False for 'Made Cut' and anything else."""
+    try:
+        status = p.get("status", {}) or {}
+        candidates = []
+        # Common locations for status text
+        candidates.append(str(status.get("displayValue", "") or ""))
+        t = status.get("type", {}) or {}
+        candidates.append(str(t.get("description", "") or ""))
+        candidates.append(str(t.get("shortDetail", "") or ""))
+        candidates.append(str(t.get("detail", "") or ""))
+        candidates.append(str(t.get("name", "") or ""))
+        for c in candidates:
+            cl = c.strip().lower()
+            if not cl:
+                continue
+            # Explicit cut/withdraw/DQ signals — but NOT "made cut"
+            if "made cut" in cl:
+                continue
+            if cl in ("mc", "cut", "wd", "dq"):
+                return True
+            if "missed cut" in cl or "withdrew" in cl or "withdrawn" in cl:
+                return True
+            if "disqualified" in cl:
+                return True
+    except Exception:
+        pass
+    return False
+
 def get_scores():
     try:
         url  = f"https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?tournamentId={TOURNAMENT_ID}"
         data = requests.get(url, timeout=10).json()
         players = data["events"][0]["competitions"][0]["competitors"]
-        score_map, leaderboard, tee_times, tee_debug = {}, [], {}, {}
+        score_map, leaderboard, tee_times, tee_debug, cut_set = {}, [], {}, {}, set()
         for p in players:
             name = p["athlete"]["displayName"]
             raw  = p.get("score","E")
@@ -1523,12 +1968,16 @@ def get_scores():
                 tee_times[name] = tt
             # Keep raw tee-time-relevant fields for admin debugging
             tee_debug[name] = _collect_tee_fields(p)
+            # Cut detection
+            if _is_cut(p):
+                cut_set.add(name)
         # Fallback — try the leaderboard endpoint for any missing tee times
         lb_tt, lb_players = _fetch_tee_times_leaderboard()
         for n, v in lb_tt.items():
             if n not in tee_times:
                 tee_times[n] = v
-        # Merge tee debug data from leaderboard endpoint
+        # Merge tee debug data from leaderboard endpoint + pick up cut status
+        # from lb endpoint in case scoreboard endpoint didn't have it
         for lp in lb_players:
             try:
                 n = lp["athlete"]["displayName"]
@@ -1538,16 +1987,18 @@ def get_scores():
                 for k, v in extras.items():
                     existing[f"[lb] {k}"] = v
                 tee_debug[n] = existing
+                if _is_cut(lp):
+                    cut_set.add(n)
             except Exception:
                 continue
         # Also keep the first leaderboard-endpoint raw player around so admin
         # can inspect the full JSON if needed
         first_raw = lb_players[0] if lb_players else (players[0] if players else {})
-        return score_map, leaderboard, data, tee_times, tee_debug, first_raw
+        return score_map, leaderboard, data, tee_times, tee_debug, first_raw, cut_set
     except:
-        return {}, [], {}, {}, {}, {}
+        return {}, [], {}, {}, {}, {}, set()
 
-score_map, espn_lb, raw_data, tee_times, tee_debug, first_raw_player = get_scores()
+score_map, espn_lb, raw_data, tee_times, tee_debug, first_raw_player, cut_set = get_scores()
 
 # Apply admin score overrides on top of ESPN data
 for player, override_val in admin["score_overrides"].items():
@@ -1608,13 +2059,22 @@ def extract_round_data(data, manual_par=0):
                     if val is None:
                         continue
                     v = int(val)
-                    # ESPN sometimes gives vs-par directly, sometimes raw strokes.
-                    # Interpret by range and reject anything that's clearly a placeholder.
-                    if -15 <= v <= 15:
-                        rd[idx] = v                # already vs-par
-                    elif 50 <= v <= 100:
+                    # ESPN sometimes gives vs-par directly, sometimes raw strokes,
+                    # and sometimes 0 as a placeholder for an unfinished/unplayed round.
+                    # A real vs-par of 0 (even par) is indistinguishable from a placeholder
+                    # unless we know the round finished — so be defensive.
+                    #   - Treat 50-100 as strokes (normal golf round)
+                    #   - Treat non-zero -15..15 as vs-par
+                    #   - Ignore 0 for rounds that ARE NOT clearly completed
+                    #   - A round is "completed" if state == "post" or idx < current_period
+                    round_completed = (state == "post") or (current_period and idx < current_period)
+                    if 50 <= v <= 100:
                         rd[idx] = v - course_par   # strokes → subtract par
-                    # else: garbage (0 placeholder, huge cumulative, etc.) — skip
+                    elif -15 <= v <= 15 and v != 0:
+                        rd[idx] = v                # already vs-par
+                    elif v == 0 and round_completed:
+                        rd[idx] = 0                # actual even-par score for a completed round
+                    # else: 0 for an in-progress/unplayed round, or garbage — skip
                 except Exception:
                     continue
             if rd:
@@ -1642,6 +2102,7 @@ if cutoff_str and "Timestamp" in df.columns:
 
 # Apply disqualification list (hide entries flagged by admin)
 dq_set = set(admin.get("disqualified", []))
+paid_map = admin.get("paid_entries", {}) or {}
 rows = []
 for _, row in df.iterrows():
     venmo_val = row.get("Venmo", "") if hasattr(row, "get") else row["Venmo"]
@@ -1655,12 +2116,32 @@ for _, row in df.iterrows():
     total  = sum(scores)
     best   = scores.index(min(scores))
     email  = row["Email"] if "Email" in df.columns else ""
+    paid   = bool(paid_map.get(entry_key, False))
     rows.append({"Name":row["Name"],"Email":email,"Venmo":row["Venmo"],"Timestamp":ts_val,
-                 "Picks":list(zip(picks,scores)),"Total":total,"BestIndex":best})
+                 "Picks":list(zip(picks,scores)),"Total":total,"BestIndex":best,
+                 "EntryKey":entry_key,"Paid":paid})
 
 df_display = pd.DataFrame(rows).sort_values("Total").reset_index(drop=True) if rows else pd.DataFrame()
 
-pot            = len(rows) * ENTRY_FEE
+# ── Private-league filter ──
+# When a league code is active (?league=CODE), scope the leaderboard + pot to
+# only that league's members. The PUBLIC pool view keeps everyone visible but
+# excludes league-only members so it feels like a real cross-section of "the
+# default pool." Admins always see everyone (scoped filter doesn't run in the
+# admin panel — that's further down the file).
+_rows_unscoped = list(rows)   # full unfiltered list, used where we need totals across pool
+if current_league_code:
+    _lg_emails = _league_emails(current_league_code)
+    rows = [r for r in rows if (r.get("Email") or "").lower().strip() in _lg_emails]
+    df_display = (
+        pd.DataFrame(rows).sort_values("Total").reset_index(drop=True)
+        if rows else pd.DataFrame()
+    )
+
+# Pot counts only paid entries; pending entries are displayed but not included in the pot
+paid_count    = sum(1 for r in rows if r.get("Paid"))
+pending_count = len(rows) - paid_count
+pot            = paid_count * ENTRY_FEE_ACTIVE
 daily_payout   = round(pot * DAILY_PCT,   2)
 overall_payout = round(pot * OVERALL_PCT, 2)
 
@@ -1674,17 +2155,44 @@ overall_payout = round(pot * OVERALL_PCT, 2)
 #   we just diff two reliable cumulative snapshots.
 # ---------------------------------------------------------------
 def cumulative_vs_par(name, round_num, rounds_data, score_map_local, period, state):
-    """Cumulative vs-par through round_num. None if unknown."""
+    """Cumulative vs-par through round_num. None if unknown.
+
+    ESPN's score_map (each golfer's current overall vs-par) is the single
+    authoritative source for a player's cumulative position in the tournament —
+    it reflects live play, admin overrides, and final results. Linescores are
+    per-round rows that can be noisy/incomplete (0 placeholders for unfinished
+    rounds, missing rounds for cut players, etc.).
+
+    Strategy:
+      - If round_num matches the LATEST round we have data for (the live/final
+        round), use score_map. That gives us the correct answer for the live
+        cumulative, and for the final cumulative post-tournament.
+      - Otherwise (earlier historical round), sum up rounds_data[1..round_num].
+    """
     if round_num <= 0:
         return 0
     tournament_done = (state == "post")
-    # For current in-progress round (or final state after post), use live score_map
-    # which reflects ESPN's authoritative cumulative-right-now number.
-    if not tournament_done and round_num == period:
-        return score_map_local.get(name)
-    if not tournament_done and round_num > period:
-        return None  # round hasn't started
-    # Past round or post-tournament: reconstruct from linescores
+
+    # Latest round that score_map reflects cumulative-through.
+    # Post-tournament: the last round (use period if sane, default 4).
+    # In progress: whatever round is currently being played.
+    if tournament_done:
+        latest = period if (period and 1 <= period <= 4) else 4
+    else:
+        latest = period if period else 0
+
+    # Future round that hasn't started yet
+    if not tournament_done and latest > 0 and round_num > latest:
+        return None
+
+    # Use authoritative score_map for the latest round
+    if latest > 0 and round_num == latest:
+        sm = score_map_local.get(name)
+        if sm is not None:
+            return sm
+        # Fall through to linescores if score_map missing for this player
+
+    # Historical round: sum from linescores
     rounds = rounds_data.get(name, {})
     if any(r not in rounds for r in range(1, round_num + 1)):
         return None
@@ -1772,6 +2280,43 @@ if _tee_iso:
         pass
 
 # ============================================================
+# LEAGUE BANNER  (shown when ?league=CODE points to a real league)
+# ============================================================
+if current_league:
+    _lg_name   = current_league.get("name", "Private League")
+    _lg_fee    = _league_entry_fee(current_league_code)
+    _lg_count  = len(_league_emails(current_league_code))
+    _member_label = "member" if _lg_count == 1 else "members"
+    st.markdown(
+        f'<div class="league-banner">'
+        f'  <div class="lb-left">'
+        f'    <div class="lb-eyebrow">🔒 Private League</div>'
+        f'    <div class="lb-name">{_lg_name}</div>'
+        f'    <div class="lb-meta">'
+        f'      <span>{_lg_count} {_member_label}</span>'
+        f'      <span class="lb-dot">·</span>'
+        f'      <span>${_lg_fee} to enter</span>'
+        f'      <span class="lb-dot">·</span>'
+        f'      <a class="league-return-link" href="?" target="_self">View public pool</a>'
+        f'    </div>'
+        f'  </div>'
+        f'  <div class="lb-code-box">{current_league_code}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+elif _league_code_attempted:
+    # User visited with a bogus code — show a soft "not found" notice and
+    # continue rendering the public pool below.
+    st.markdown(
+        f'<div class="league-not-found">'
+        f'  League code <strong>{_league_code_attempted}</strong> not found. '
+        f'Showing the public pool instead. '
+        f'<a class="league-return-link" href="?" target="_self">Dismiss</a>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+# ============================================================
 # HEADER
 # ============================================================
 col_title, col_stats = st.columns([2, 1])
@@ -1785,11 +2330,20 @@ with col_title:
         _hero_left = st.container()
 
 with _hero_left:
-    # Title + subtitle in a SINGLE markdown block so no inter-element gap.
+    # Title + subtitle (with inline tournament name) in a SINGLE markdown block
+    # so no inter-element Streamlit gap — and the title block keeps the same
+    # overall height whether a tournament is set or not, so the Join Pool
+    # button stays aligned with the How It Works expander on the right.
+    _tourney_name = (admin.get("tournament_name", "") or "").strip()
+    _tourney_inline = (
+        f'<span class="subtitle-sep">·</span>'
+        f'<span class="subtitle-tourney">{_tourney_name}</span>'
+        if _tourney_name else ""
+    )
     st.markdown(
         '<div class="title-block">'
         '<div class="main-title">⛳ The Clubhouse Pool</div>'
-        '<div class="main-subtitle">Weekly Golf Pool</div>'
+        f'<div class="main-subtitle">Weekly Golf Pool{_tourney_inline}</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1814,11 +2368,25 @@ with _hero_left:
 
         if not st.session_state.entry_mode and not st.session_state.entry_submitted:
             st.markdown('<div class="join-pool-marker"></div>', unsafe_allow_html=True)
-            if st.button(f"Join Pool  ·  ${ENTRY_FEE}", key="open_entry", use_container_width=True):
+            _cta_label = (
+                f"Join {current_league.get('name','League')}  ·  ${ENTRY_FEE_ACTIVE}"
+                if current_league else
+                f"Join Pool  ·  ${ENTRY_FEE_ACTIVE}"
+            )
+            if st.button(_cta_label, key="open_entry", use_container_width=True):
                 st.session_state.entry_mode = True
                 st.rerun()
             # Invite-a-friend share block under the CTA
             render_share_block(variant="default")
+
+            # ── "or start your own league" CTA (only on public pool view) ──
+            # Using st.caption instead of raw HTML to avoid any chance of
+            # Streamlit's markdown parser leaking a stray </div> onto the page.
+            if not current_league:
+                st.markdown(
+                    '<div class="create-league-cta">Playing with friends? <strong>Start a private league</strong> below ↓</div>',
+                    unsafe_allow_html=True,
+                )
 
             # Dynamically match the Join Pool button's width to the main title
             # so its right edge lands exactly where "Pool" ends.
@@ -1857,17 +2425,27 @@ with _hero_left:
             """, height=0)
 
 with col_stats:
-    st.markdown(f"""
-    <div style="display:flex; gap:10px; margin-top:8px;">
-        <div class="stat-box" style="flex:1;">
-            <div class="stat-value">${pot}</div>
-            <div class="stat-label">Prize Pot</div>
-        </div>
-        <div class="stat-box" style="flex:1;">
-            <div class="stat-value">{len(rows)}</div>
-            <div class="stat-label">Entries</div>
-        </div>
-    </div>""", unsafe_allow_html=True)
+    entries_sub = ""
+    if pending_count > 0 and paid_count > 0:
+        entries_sub = f'<div class="stat-sub">{paid_count} paid · {pending_count} pending</div>'
+    elif pending_count > 0 and paid_count == 0:
+        entries_sub = '<div class="stat-sub">all pending</div>'
+    # Flush-left HTML — indented f-strings inside st.markdown get misread as
+    # markdown code blocks, which can leak stray </div> tags onto the page.
+    _stats_html = (
+        '<div style="display:flex; gap:10px; margin-top:8px;">'
+        '<div class="stat-box" style="flex:1;">'
+        f'<div class="stat-value">${pot}</div>'
+        '<div class="stat-label">Prize Pot</div>'
+        '</div>'
+        '<div class="stat-box" style="flex:1;">'
+        f'<div class="stat-value">{len(rows)}</div>'
+        '<div class="stat-label">Entries</div>'
+        f'{entries_sub}'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(_stats_html, unsafe_allow_html=True)
 
     # Inline Rules dropdown — native expander, no page reload.
     # Wrapped in a keyed container so CSS (.st-key-rules_container) can align it
@@ -1878,13 +2456,12 @@ with col_stats:
         # Older Streamlit (<1.36) doesn't support key= on container
         _rules_ctx = st.container()
     with _rules_ctx:
-        st.markdown('<div class="rules-anchor"></div>', unsafe_allow_html=True)
         with st.expander("📖  How It Works", expanded=False):
             st.markdown(f"""
 <div style="color:#d8e0d8; font-size:0.88rem; line-height:1.55;">
 
 <strong style="color:#fff;">The Basics</strong><br>
-• <strong>${ENTRY_FEE}</strong> to enter. Venmo <code>@{VENMO_HANDLE}</code> — not in until payment hits.<br>
+• <strong>${ENTRY_FEE_ACTIVE}</strong> to enter. Venmo <code>@{VENMO_HANDLE}</code> — not in until payment hits.<br>
 • Pick <strong>3 golfers</strong>: one Favorite, one Contender, one Longshot.<br>
 • Your <strong>score = sum of all 3 picks</strong> vs par. Low score wins.<br>
 
@@ -1915,7 +2492,7 @@ if not admin["entries_frozen"]:
     if st.session_state.get("entry_submitted"):
         submitted_name = st.session_state.entry_submitted_name or "You"
         submitted_email = st.session_state.get("entry_submitted_email", "")
-        vlink = venmo_deep_link(ENTRY_FEE, "The Clubhouse")
+        vlink = venmo_deep_link(ENTRY_FEE_ACTIVE, "The Clubhouse")
 
         # Look up this player's past history by email.
         # IMPORTANT: every HTML f-string below must be flush-left / single-line —
@@ -2076,7 +2653,7 @@ if not admin["entries_frozen"]:
 
             sub_col, cancel_col = st.columns([2, 1])
             with sub_col:
-                submit = st.form_submit_button(f"Submit & Pay ${ENTRY_FEE} via Venmo", use_container_width=True)
+                submit = st.form_submit_button(f"Submit & Pay ${ENTRY_FEE_ACTIVE} via Venmo", use_container_width=True)
             with cancel_col:
                 cancel = st.form_submit_button("Cancel", use_container_width=True)
 
@@ -2109,6 +2686,10 @@ if not admin["entries_frozen"]:
                         st.session_state.entry_submitted_email = email_clean.lower()
                         st.session_state.entry_submitted_picks = [p1, p2, p3]
                         st.session_state.entry_mode = False
+                        # If they submitted from inside a private-league view,
+                        # auto-enroll them in that league (email-based membership).
+                        if current_league_code:
+                            _join_league(email_clean, current_league_code)
                         # Invalidate the sheet cache so new entry shows up
                         load_sheet.clear()
                         st.rerun()
@@ -2118,9 +2699,120 @@ if not admin["entries_frozen"]:
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
+# CREATE A LEAGUE  (only shown on public pool view, not inside an active league)
+# ============================================================
+if not current_league and not admin.get("entries_frozen"):
+    with st.expander("🏆  Start a private league with your friends", expanded=False):
+        st.markdown(
+            "<div style='color:#a7c9a7; font-size:0.88rem; line-height:1.5; margin-bottom:8px;'>"
+            "Run your own mini-pool inside the Clubhouse. You set the entry fee, "
+            "invite your group via a shareable link, and the leaderboard filters "
+            "to just your crew."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        _cl_c1, _cl_c2 = st.columns([3, 1])
+        with _cl_c1:
+            _cl_name = st.text_input(
+                "League name",
+                key="create_league_name",
+                placeholder="e.g. Sunday Squad, The 19th Hole, Backyard Bros",
+                max_chars=40,
+            )
+        with _cl_c2:
+            _cl_fee = st.number_input(
+                "Entry fee ($)",
+                key="create_league_fee",
+                min_value=1, max_value=500, value=10, step=1,
+            )
+
+        _cl_email = st.text_input(
+            "Your email (league commissioner)",
+            key="create_league_email",
+            placeholder="you@example.com",
+            help="We use this to mark you as the league's creator.",
+        )
+
+        _cl_submit = st.button(
+            "Create League",
+            key="btn_create_league",
+            type="primary",
+            use_container_width=True,
+        )
+
+        if _cl_submit:
+            _errs = []
+            _nm = (_cl_name or "").strip()
+            _em = (_cl_email or "").strip().lower()
+            if not _nm:
+                _errs.append("League name is required.")
+            if not _em or "@" not in _em or "." not in _em.split("@")[-1]:
+                _errs.append("A valid email is required.")
+            if _errs:
+                for _e in _errs:
+                    st.error(_e)
+            else:
+                # Mint a fresh code
+                _existing = set((admin.get("leagues") or {}).keys())
+                _new_code = _generate_league_code(_existing)
+
+                # Persist the league
+                from datetime import datetime as _dt_lg
+                admin.setdefault("leagues", {})[_new_code] = {
+                    "name": _nm,
+                    "fee": int(_cl_fee),
+                    "commissioner_email": _em,
+                    "created_at": _dt_lg.now().isoformat(),
+                    "members": [_em],
+                }
+                # Auto-join the commissioner
+                admin.setdefault("league_memberships", {})[_em] = _new_code
+                save_state(admin)
+
+                # Stash for the post-create reveal
+                st.session_state["last_created_league_code"] = _new_code
+                st.session_state["last_created_league_name"] = _nm
+                st.session_state["last_created_league_fee"]  = int(_cl_fee)
+                st.rerun()
+
+    # Post-create success block — appears once, right below the expander.
+    _new_code = st.session_state.get("last_created_league_code", "")
+    if _new_code:
+        _lgc = _leagues_store.get(_new_code, {}) or admin.get("leagues", {}).get(_new_code, {})
+        _share_url = f"{APP_URL}/?league={_new_code}"
+        _nm_cre = st.session_state.get("last_created_league_name", _lgc.get("name",""))
+        _fee_cre = st.session_state.get("last_created_league_fee", _lgc.get("fee", ENTRY_FEE))
+        st.markdown(
+            f'<div class="league-share-box">'
+            f'  <div class="ls-title">🎉 League created — <em>{_nm_cre}</em></div>'
+            f'  <div style="color:#a7c9a7; font-size:0.85rem;">Your league code:</div>'
+            f'  <div class="ls-code">{_new_code}</div>'
+            f'  <div style="color:#a7c9a7; font-size:0.85rem;">Share this link with your friends:</div>'
+            f'  <code class="ls-url">{_share_url}</code>'
+            f'  <div class="ls-hint">Anyone who enters from this link joins your league at ${_fee_cre}/entry. '
+            f'You\'ve already been added as the first member.</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        # Clear-the-reveal button
+        if st.button("Got it — hide this", key="btn_dismiss_new_league"):
+            for _k in ("last_created_league_code", "last_created_league_name", "last_created_league_fee"):
+                st.session_state.pop(_k, None)
+            st.rerun()
+
+# ============================================================
 # POOL STANDINGS
 # ============================================================
-st.markdown('<div class="section-title">Pool Standings</div>', unsafe_allow_html=True)
+_ps_tname = (admin.get("tournament_name", "") or "").strip()
+_ps_suffix = f' <span class="section-sub">· {_ps_tname}</span>' if _ps_tname else ""
+# In a private league, the section title reflects the league name instead
+# of the generic "Pool Standings" label so the view feels scoped.
+if current_league:
+    _ps_heading = f'{current_league.get("name","League")} Standings'
+else:
+    _ps_heading = "Pool Standings"
+st.markdown(f'<div class="section-title">{_ps_heading}{_ps_suffix}</div>', unsafe_allow_html=True)
 
 # ---- "Who are you?" identity strip (persists across rerenders via session state) ----
 # Auto-seed from entry submission or returning-user lookup if we have that info.
@@ -2227,11 +2919,13 @@ if not df_display.empty:
             star     = '<span class="pick-chip-star">⭐</span>' if is_best else ""
             chip_cls = "pick-chip best" if is_best else "pick-chip"
             ov_badge = '<span class="override-badge">✎</span>' if pname in admin["score_overrides"] else ""
+            # CUT pill next to golfers who missed the cut; nothing else clutters the name.
+            cut_html = '<span class="cut-pill">CUT</span>' if pname in cut_set else ""
             # Wrap name in its own span so mobile CSS can use flex space-between
             # to align "Name ……… Score" on a clean list row.
             picks_html += (
                 f'<div class="{chip_cls}">'
-                f'<span class="pick-chip-name">{star}{pname}{ov_badge}</span>'
+                f'<span class="pick-chip-name">{star}{pname}{ov_badge}{cut_html}</span>'
                 f'<span class="{sc_cls} pick-chip-score">{fmt_score(pscore)}</span>'
                 f'</div>'
             )
@@ -2269,9 +2963,11 @@ if not df_display.empty:
         is_you    = bool(my_email_cur) and (row_email == my_email_cur)
 
         # Card class
+        is_paid = bool(row.get("Paid", False))
         cls_bits = ["entry-card"]
         if is_leader: cls_bits.append("leader")
         if is_you:    cls_bits.append("you")
+        if not is_paid: cls_bits.append("pending")
         card_cls = " ".join(cls_bits)
 
         # Position delta (only show if we have a snapshot)
@@ -2296,12 +2992,13 @@ if not df_display.empty:
         # Hall of Fame badge (only if they have history wins)
         hof_html  = hof_badge_html(row_email, history)
         you_pill  = '<span class="you-pill">YOU</span>' if is_you else ""
+        pending_pill = '' if is_paid else '<span class="pending-pill" title="Payment not yet received">PENDING</span>'
 
         card_html = (
             f'<div class="{card_cls}">'
             f'{rank_html}'
             f'<div class="entry-id">'
-            f'<div class="entry-name">{row["Name"]}{hof_html}{you_pill}</div>'
+            f'<div class="entry-name">{row["Name"]}{hof_html}{you_pill}{pending_pill}</div>'
             f'<div class="entry-venmo">@{row["Venmo"]}</div>'
             f'</div>'
             f'<div class="picks-area">{picks_html}</div>'
@@ -2311,13 +3008,33 @@ if not df_display.empty:
         )
         st.markdown(card_html, unsafe_allow_html=True)
 else:
-    st.markdown(
-        '<div style="text-align:center;padding:60px 20px;color:#4a6b4a;">'
-        '<div style="font-size:2rem;">⛳</div>'
-        '<div style="font-family:\'Playfair Display\',serif;font-size:1.2rem;color:#fff;margin-top:8px;">No entries yet</div>'
-        '</div>',
-        unsafe_allow_html=True
-    )
+    if current_league:
+        # League-aware empty state: show the invite URL so the commissioner
+        # can text it to their group right from this screen.
+        _share = f"{APP_URL}/?league={current_league_code}"
+        st.markdown(
+            f'<div style="text-align:center;padding:40px 20px;color:#4a6b4a;">'
+            f'<div style="font-size:2rem;">🏆</div>'
+            f'<div style="font-family:\'Playfair Display\',serif;font-size:1.2rem;color:#fff;margin-top:8px;">'
+            f'No one in your league has entered yet'
+            f'</div>'
+            f'<div style="margin-top:8px;font-size:0.88rem;color:#a7c9a7;">'
+            f'Send this link to your friends to get them in:'
+            f'</div>'
+            f'<code style="display:inline-block;margin-top:10px;padding:8px 14px;background:#0a0f0a;'
+            f'border:1px solid #2a3d2a;border-radius:8px;color:#4ade80;font-size:0.9rem;">'
+            f'{_share}</code>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            '<div style="text-align:center;padding:60px 20px;color:#4a6b4a;">'
+            '<div style="font-size:2rem;">⛳</div>'
+            '<div style="font-family:\'Playfair Display\',serif;font-size:1.2rem;color:#fff;margin-top:8px;">No entries yet</div>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
@@ -2395,8 +3112,42 @@ st.markdown('<hr class="divider">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">Hall of Fame</div>', unsafe_allow_html=True)
 
 leaderboard = compute_leaderboard(admin.get("history", []))
+history_list = admin.get("history", []) or []
+last_tourney = history_list[-1] if history_list else None
 
+# ───────────────────────────────────────────────────────────────
+# 1) Last Champion card — show the most recent tournament winner
+#    (if there's any history at all)
+# ───────────────────────────────────────────────────────────────
+if last_tourney and last_tourney.get("overall_winner"):
+    _lc_name    = last_tourney.get("overall_winner", "")
+    _lc_tourney = last_tourney.get("tournament_name", "Last Tournament")
+    _lc_payout  = last_tourney.get("overall_payout", 0)
+    _lc_score   = ""
+    # Try to pull winner's total score from entries for flavor
+    for _e in last_tourney.get("entries", []) or []:
+        if (_e.get("name") or "").strip().lower() == _lc_name.strip().lower():
+            _sc = _e.get("total")
+            if _sc is not None:
+                _lc_score = fmt_score(_sc)
+            break
+    _score_tag = f'<span class="last-champ-score">{_lc_score}</span>' if _lc_score else ""
+    _winnings_tag = f'<span class="last-champ-winnings">+${_lc_payout:.0f}</span>' if _lc_payout else ""
+    st.markdown(
+        f'<div class="last-champ">'
+        f'<div class="last-champ-label">👑 Last Champion</div>'
+        f'<div class="last-champ-name">{_lc_name}</div>'
+        f'<div class="last-champ-meta">{_lc_tourney}{_score_tag}{_winnings_tag}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+# ───────────────────────────────────────────────────────────────
+# 2) All-time leaderboard (full table if history exists)
+# ───────────────────────────────────────────────────────────────
 if leaderboard:
+    _hof_subtitle = "All-time standings"
+    st.markdown(f'<div class="hof-subhead">{_hof_subtitle}</div>', unsafe_allow_html=True)
     header_html = """
     <div class="tourney-row" style="border-bottom:1px solid #2a4a2a;background:#0d160d;">
         <span style="width:28px;color:#8aad8a;font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;">#</span>
@@ -2426,14 +3177,43 @@ if leaderboard:
     st.markdown(f'<div class="tourney-container">{header_html}{rows_html}</div>', unsafe_allow_html=True)
     st.caption(f"Showing top {min(25, len(leaderboard))} of {len(leaderboard)} all-time players.")
 else:
-    st.markdown("""
-    <div class="hof-empty" style="text-align:center;padding:24px 16px;color:#4a6b4a;
-        background:#0d160d; border:1px solid #1e2e1e; border-radius:12px; margin:4px 0 8px 0;">
-        <div style="font-size:1.6rem;">🏆</div>
-        <div style="font-family:'Playfair Display',serif;font-size:1rem;color:#fff;margin-top:4px;">Hall of Fame opens after Sunday</div>
-        <div style="font-size:0.72rem;color:#4a6b4a;margin-top:3px;letter-spacing:0.5px;">All-time leaders appear here once tournaments wrap.</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ─────────────────────────────────────────────────────────
+    # Cold-start empty state — no archived tournaments yet.
+    # Rather than "opens after Sunday", show the CURRENT WEEK's
+    # top 3 as an energizing "In the running" preview so the
+    # section never feels dead.
+    # ─────────────────────────────────────────────────────────
+    if not df_display.empty:
+        preview_rows = ""
+        for _i in range(min(3, len(df_display))):
+            _row = df_display.iloc[_i]
+            _medal = ["🥇","🥈","🥉"][_i]
+            _sc_cls = "total-under" if _row["Total"] < 0 else "total-over" if _row["Total"] > 0 else "total-even"
+            preview_rows += (
+                f'<div class="hof-preview-row">'
+                f'<span class="hof-preview-rank">{_medal}</span>'
+                f'<span class="hof-preview-name">{_row["Name"]}</span>'
+                f'<span class="hof-preview-score {_sc_cls}">{fmt_score(_row["Total"])}</span>'
+                f'</div>'
+            )
+        st.markdown(
+            f'<div class="hof-preview">'
+            f'<div class="hof-preview-label">🏆 In the running this week</div>'
+            f'{preview_rows}'
+            f'<div class="hof-preview-footer">First champion gets crowned Sunday night.</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="hof-empty" style="text-align:center;padding:24px 16px;color:#4a6b4a;'
+            'background:#0d160d; border:1px solid #1e2e1e; border-radius:12px; margin:4px 0 8px 0;">'
+            '<div style="font-size:1.6rem;">🏆</div>'
+            '<div style="font-family:\'Playfair Display\',serif;font-size:1rem;color:#fff;margin-top:4px;">Be the first champion</div>'
+            '<div style="font-size:0.72rem;color:#4a6b4a;margin-top:3px;letter-spacing:0.5px;">The first name etched here is yours for the taking — join before Thursday.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
@@ -2498,25 +3278,177 @@ if _admin_visible:
 
         if pwd == ADMIN_PASSWORD:
             st.success("✓ Logged in")
-            st.markdown("---")
 
-            # ── Freeze entries ──
-            st.markdown("**🔒 Entry Gate**")
-            freeze_val = st.toggle("Freeze entries (replaces Enter Pool button with 'Entries Closed')",
-                                   value=admin["entries_frozen"], key="freeze_toggle")
-            if freeze_val != admin["entries_frozen"]:
-                admin["entries_frozen"] = freeze_val
-                save_state(admin)
-                st.rerun()
+            # ── Contextual phase hint: tell the admin what to do NOW ──
+            from datetime import datetime as _dt_now
+            _today = _dt_now.now()
+            _dow = _today.weekday()   # Mon=0 ... Sun=6
+            if admin.get("tournament_finished"):
+                _phase_label = "🏁 Wrap Up"
+                _phase_hint  = (
+                    "Tournament is marked finished. Jump to <strong>📰 Weekly Recap</strong> to copy "
+                    "the summary into your group chat, then <strong>📦 Archive Tournament</strong> "
+                    "to lock results into the Hall of Fame."
+                )
+            elif current_period and current_period >= 1 and not admin.get("tournament_finished"):
+                _phase_label = "🟢 During Tournament"
+                _phase_hint  = (
+                    "Tournament is live. Main jobs: mark <strong>💰 Payments</strong> as Venmos come "
+                    "in, capture a <strong>📸 Rank Snapshot</strong> each night (Thu/Fri/Sat), and "
+                    "use <strong>✎ Score Overrides</strong> only if ESPN is wrong."
+                )
+            elif _dow in (0, 1, 2):   # Mon–Wed
+                _phase_label = "🆕 New Tournament Setup"
+                _phase_hint  = (
+                    "It's early-week — time to prep the next pool. Workflow: "
+                    "<strong>📋 Tier-List Helper</strong> (paste the field, get tiers + Google Form lists) "
+                    "→ update <code>app.py</code> + Google Form → set the <strong>🕐 First Tee Time</strong> "
+                    "→ hit <strong>🔄 Start New Tournament</strong> to clear last week's board."
+                )
+            else:   # Thursday morning before tee-off
+                _phase_label = "⏰ Pre-Tee-Off"
+                _phase_hint  = (
+                    "Last call before Thursday tee-off. Make sure <strong>💰 Payments</strong> are "
+                    "up to date and <strong>🕐 First Tee Time</strong> is set so the countdown strip "
+                    "works. Flip <strong>🔒 Entry Gate</strong> to freeze once the first group tees off."
+                )
+            st.markdown(
+                f'<div class="admin-phase-hint">'
+                f'<strong>Right now: {_phase_label}</strong><br>{_phase_hint}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
-            st.markdown("---")
+            # ══════════════════════════════════════════════════════════
+            # 🆕 NEW TOURNAMENT SETUP (Monday)
+            # ══════════════════════════════════════════════════════════
+            st.markdown(
+                '<div class="admin-group setup">'
+                '<span class="g-title">🆕 New Tournament Setup</span>'
+                '<span class="g-when">Monday</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Run these Mon–Wed to prep for Thursday.")
 
-            # ── Start new tournament (weekly reset) ──
-            st.markdown("**🔄 Start New Tournament**")
-            st.caption("Clears last week's entries from the board (cutoff by timestamp — nothing deleted from the sheet). Resets daily winners and tournament status. Do this Monday afternoon before reopening entries.")
+            # ── Tier-List Helper — paste a tournament field, get formatted tier arrays ──
+            with st.expander("📋 Tier-List Helper — paste field, get tiers", expanded=False):
+                st.caption(
+                    "Paste the tournament field below — one golfer per line, or comma-separated. "
+                    "Tool strips junk (rank numbers, odds, '+' signs), splits into 3 tiers by world rank "
+                    "order pasted, and generates both the Python `TIER_1/2/3 = [...]` snippet for app.py "
+                    "AND a Google Form dropdown list (one name per line). "
+                    "Defaults: ~12 in Tier 1 (stars), ~30 in Tier 2 (contenders), rest in Tier 3."
+                )
+                _field_text = st.text_area(
+                    "Paste field (one per line, or with ranks/odds — we'll clean it)",
+                    height=200, key="tier_field_text",
+                    placeholder="1. Scottie Scheffler +350\n2. Rory McIlroy +700\n..."
+                )
+                _tc1, _tc2, _tc3 = st.columns(3)
+                with _tc1:
+                    _n1 = st.number_input("Tier 1 size", min_value=1, max_value=50, value=12, step=1, key="tier1_sz")
+                with _tc2:
+                    _n2 = st.number_input("Tier 2 size", min_value=1, max_value=80, value=30, step=1, key="tier2_sz")
+                with _tc3:
+                    st.caption("Tier 3 = everyone else")
+
+                if st.button("Build tiers", key="btn_build_tiers"):
+                    import re as _re
+                    lines = [ln.strip() for ln in (_field_text or "").splitlines() if ln.strip()]
+                    if len(lines) == 1 and "," in lines[0]:
+                        lines = [x.strip() for x in lines[0].split(",") if x.strip()]
+                    cleaned = []
+                    seen = set()
+                    for ln in lines:
+                        s = _re.sub(r"^(t?\d+[\.\)]?\s*)", "", ln, flags=_re.I)
+                        s = _re.sub(r"\s*[+\-]\d+\s*$", "", s)
+                        s = _re.sub(r"\s*\([^)]*\)\s*$", "", s)
+                        s = _re.sub(r"\s+[A-Z]{3}\s*$", "", s)
+                        s = s.strip().strip(",").strip()
+                        if s and s.lower() not in seen:
+                            seen.add(s.lower())
+                            cleaned.append(s)
+                    if not cleaned:
+                        st.warning("No names parsed — check your paste.")
+                    else:
+                        t1 = cleaned[:int(_n1)]
+                        t2 = cleaned[int(_n1):int(_n1) + int(_n2)]
+                        t3 = cleaned[int(_n1) + int(_n2):]
+                        st.success(f"Parsed **{len(cleaned)}** golfers → Tier 1: {len(t1)} · Tier 2: {len(t2)} · Tier 3: {len(t3)}")
+                        py_lines = ["TIER_1 = ["]
+                        for n in t1: py_lines.append(f'    "{n}",')
+                        py_lines.append("]")
+                        py_lines.append("TIER_2 = [")
+                        for n in t2: py_lines.append(f'    "{n}",')
+                        py_lines.append("]")
+                        py_lines.append("TIER_3 = [")
+                        for n in t3: py_lines.append(f'    "{n}",')
+                        py_lines.append("]")
+                        st.markdown("**Python snippet for `app.py`:**")
+                        st.code("\n".join(py_lines), language="python")
+                        st.markdown("**Google Form dropdowns — paste into each pick question:**")
+                        gc1, gc2, gc3 = st.columns(3)
+                        with gc1:
+                            st.caption("Pick 1 (Tier 1)")
+                            st.code("\n".join(t1), language=None)
+                        with gc2:
+                            st.caption("Pick 2 (Tier 2)")
+                            st.code("\n".join(t2), language=None)
+                        with gc3:
+                            st.caption("Pick 3 (Tier 3)")
+                            st.code("\n".join(t3), language=None)
+
+            # ── Tee time / tournament start (for countdown strip) ──
+            with st.expander("🕐 First Tee Time — drives the countdown strip", expanded=False):
+                st.caption("Set the first tee-off time. A countdown strip appears at the top of the app until entries lock. Leave blank to hide.")
+                from datetime import datetime as _dt2, date as _date2, time as _time2
+                cur_start_str = admin.get("tournament_start", "")
+                try:
+                    _cs = _dt2.fromisoformat(cur_start_str) if cur_start_str else None
+                except Exception:
+                    _cs = None
+                ct1, ct2 = st.columns(2)
+                with ct1:
+                    tee_date = st.date_input("First tee date",
+                                             value=_cs.date() if _cs else _date2.today(),
+                                             key="tee_date_input")
+                with ct2:
+                    tee_time = st.time_input("First tee time (local)",
+                                             value=_cs.time() if _cs else _time2(7, 0),
+                                             key="tee_time_input")
+                tc1, tc2 = st.columns(2)
+                if tc1.button("💾 Save tee time", key="btn_save_tee"):
+                    admin["tournament_start"] = _dt2.combine(tee_date, tee_time).isoformat()
+                    save_state(admin)
+                    st.success("✓ Tee time saved")
+                    st.rerun()
+                if tc2.button("🚫 Clear tee time", key="btn_clear_tee"):
+                    admin["tournament_start"] = ""
+                    save_state(admin)
+                    st.rerun()
+
+            # ── Course par override ──
+            with st.expander("⛳ Course Par — only if auto-detect fails", expanded=False):
+                auto_par_label = f"auto-detected: {course_par}" if auto_par_found else "auto-detect failed — using fallback 72"
+                st.caption(f"Used by Biggest Mover calc. Current value: **{course_par}** ({auto_par_label if not admin.get('course_par') else 'manual override'}). Set to 0 to re-auto-detect.")
+                new_par = st.number_input(
+                    "Manual par (0 = auto)",
+                    min_value=0, max_value=80,
+                    value=int(admin.get("course_par", 0)),
+                    step=1, key="par_override"
+                )
+                if new_par != admin.get("course_par", 0):
+                    admin["course_par"] = int(new_par)
+                    save_state(admin)
+                    st.rerun()
+
+            # ── Start new tournament (the BIG reset — do this last) ──
+            st.markdown("**🔄 Start New Tournament** _(do this last, after tier list + tee time are set)_")
+            st.caption("Clears last week's entries from the board (cutoff by timestamp — nothing deleted from the sheet). Resets daily winners and tournament status.")
             new_tourney_name = st.text_input(
                 "New tournament name (optional)",
-                placeholder="e.g. Zurich Classic 2026",
+                placeholder="e.g. Cadillac Invitational 2026",
                 key="new_tourney_name"
             )
             confirm_reset = st.checkbox("I understand this will hide all current entries", key="confirm_reset")
@@ -2528,6 +3460,9 @@ if _admin_visible:
                 admin["tournament_finished"] = False
                 admin["entries_frozen"]      = False
                 admin["disqualified"]        = []
+                admin["paid_entries"]        = {}
+                admin["rank_snapshot"]       = {}
+                admin["rank_snapshot_time"]  = ""
                 if new_tourney_name.strip():
                     admin["tournament_name"] = new_tourney_name.strip()
                 save_state(admin)
@@ -2535,35 +3470,143 @@ if _admin_visible:
                 st.success("✓ New tournament started — board is clean.")
                 st.rerun()
 
-            st.markdown("---")
+            # ── Private Leagues (view / rename / delete) ──
+            st.markdown("**🏆 Private Leagues**")
+            _leagues_dict = admin.get("leagues", {}) or {}
+            _memb = admin.get("league_memberships", {}) or {}
+            if not _leagues_dict:
+                st.caption("No private leagues yet. Anyone can create one from the public site.")
+            else:
+                st.caption(f"{len(_leagues_dict)} league(s) · {len(_memb)} total memberships.")
+                for _code, _lg in sorted(_leagues_dict.items(), key=lambda x: x[1].get("created_at", "")):
+                    _m = [e for e, c in _memb.items() if c == _code]
+                    _paid_in_lg = 0
+                    for _r in _rows_unscoped:
+                        if (_r.get("Email") or "").lower().strip() in set(_m) and _r.get("Paid"):
+                            _paid_in_lg += 1
+                    _pot_lg = _paid_in_lg * int(_lg.get("fee", ENTRY_FEE))
+                    with st.expander(
+                        f"🔒 {_lg.get('name','(unnamed)')}  ·  {_code}  ·  {len(_m)} members  ·  ${_pot_lg} pot",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            f"Created {_lg.get('created_at','?')[:10]} by "
+                            f"**{_lg.get('commissioner_email','?')}** · ${int(_lg.get('fee',ENTRY_FEE))}/entry"
+                        )
+                        _share = f"{APP_URL}/?league={_code}"
+                        st.code(_share, language=None)
 
-            # ── Tournament finished ──
-            st.markdown("**🏁 Tournament Status**")
-            fin_val = st.toggle("Mark tournament finished (reveals Overall winner card)",
-                                value=admin["tournament_finished"], key="fin_toggle")
-            if fin_val != admin["tournament_finished"]:
-                admin["tournament_finished"] = fin_val
-                save_state(admin)
-                st.rerun()
+                        if _m:
+                            st.markdown("**Members**")
+                            for _e in sorted(_m):
+                                _c1, _c2 = st.columns([5, 1])
+                                with _c1:
+                                    st.markdown(f"- `{_e}`")
+                                with _c2:
+                                    if st.button("Remove", key=f"rm_{_code}_{_e}"):
+                                        admin["league_memberships"].pop(_e, None)
+                                        _lg.setdefault("members", [])
+                                        if _e in _lg["members"]:
+                                            _lg["members"].remove(_e)
+                                        save_state(admin)
+                                        st.success(f"Removed {_e}")
+                                        st.rerun()
+                        else:
+                            st.caption("No members yet.")
 
-            st.markdown("---")
+                        _rc1, _rc2 = st.columns(2)
+                        with _rc1:
+                            _newname = st.text_input(
+                                "Rename league",
+                                value=_lg.get("name",""),
+                                key=f"rename_{_code}",
+                            )
+                            if st.button("Save name", key=f"save_name_{_code}"):
+                                _lg["name"] = _newname.strip() or _lg.get("name","")
+                                save_state(admin)
+                                st.success("Renamed.")
+                                st.rerun()
+                        with _rc2:
+                            _newfee = st.number_input(
+                                "Change fee ($)",
+                                min_value=1, max_value=500,
+                                value=int(_lg.get("fee", ENTRY_FEE)),
+                                step=1, key=f"fee_{_code}",
+                            )
+                            if st.button("Save fee", key=f"save_fee_{_code}"):
+                                _lg["fee"] = int(_newfee)
+                                save_state(admin)
+                                st.success("Fee updated.")
+                                st.rerun()
 
-            # ── Daily winners ──
-            st.markdown("**🏆 Set Daily Winners**")
-            entry_names = [""] + sorted(df["Name"].tolist()) if not df.empty else [""]
-            cols = st.columns(4)
-            changed = False
-            for col, day in zip(cols, ["Thursday","Friday","Saturday","Sunday"]):
-                with col:
-                    current = admin["daily_winners"].get(day, "")
-                    idx     = entry_names.index(current) if current in entry_names else 0
-                    chosen  = st.selectbox(day, entry_names, index=idx, key=f"winner_{day}")
-                    if chosen != current:
-                        admin["daily_winners"][day] = chosen
-                        changed = True
-            if changed:
-                save_state(admin)
-                st.rerun()
+                        st.markdown("---")
+                        _confirm = st.checkbox(
+                            f"Yes, delete league {_code} (cannot be undone)",
+                            key=f"confirm_del_{_code}",
+                        )
+                        if st.button(f"🗑 Delete {_code}", key=f"del_{_code}", disabled=not _confirm):
+                            # Remove league + all its memberships
+                            for _e in list(_m):
+                                admin["league_memberships"].pop(_e, None)
+                            admin["leagues"].pop(_code, None)
+                            save_state(admin)
+                            st.success(f"Deleted league {_code}.")
+                            st.rerun()
+
+            # ══════════════════════════════════════════════════════════
+            # 🟢 DURING TOURNAMENT (Thu–Sun)
+            # ══════════════════════════════════════════════════════════
+            st.markdown(
+                '<div class="admin-group during">'
+                '<span class="g-title">🟢 During Tournament</span>'
+                '<span class="g-when">Thu – Sun</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Day-to-day tournament management.")
+
+            # ── Payments (mark each entry paid) ──
+            st.markdown("**💰 Payments**")
+            st.caption(
+                f"Mark who has Venmo'd. Unpaid entries show a **PENDING** pill and don't count toward the prize pot. "
+                f"Currently: **{paid_count} paid · {pending_count} pending** (${paid_count * ENTRY_FEE} in the pot)."
+            )
+            if df_display.empty:
+                st.info("No entries yet.")
+            else:
+                # Quick controls
+                pc1, pc2 = st.columns(2)
+                if pc1.button("✓ Mark all paid", key="btn_mark_all_paid", use_container_width=True):
+                    paid_dict = admin.setdefault("paid_entries", {})
+                    for _, erow in df_display.iterrows():
+                        k = f"{erow['Venmo']}|{erow['Timestamp']}"
+                        paid_dict[k] = True
+                    save_state(admin)
+                    st.rerun()
+                if pc2.button("✕ Mark all unpaid", key="btn_mark_all_unpaid", use_container_width=True):
+                    admin["paid_entries"] = {}
+                    save_state(admin)
+                    st.rerun()
+
+                st.markdown("")
+                # Per-entry checkboxes — show unpaid first so you can clear the queue fast
+                _df_sorted = df_display.sort_values(by="Paid", ascending=True).reset_index(drop=True) \
+                    if "Paid" in df_display.columns else df_display
+                for _, erow in _df_sorted.iterrows():
+                    e_key = f"{erow['Venmo']}|{erow['Timestamp']}"
+                    is_paid = bool(erow.get("Paid", False))
+                    pcol1, pcol2 = st.columns([5, 2])
+                    label = f"**{erow['Name']}** · @{erow['Venmo']}"
+                    pcol1.markdown(label)
+                    new_val = pcol2.checkbox("Paid", value=is_paid, key=f"paid_chk_{e_key}")
+                    if new_val != is_paid:
+                        paid_dict = admin.setdefault("paid_entries", {})
+                        if new_val:
+                            paid_dict[e_key] = True
+                        else:
+                            paid_dict.pop(e_key, None)
+                        save_state(admin)
+                        st.rerun()
 
             st.markdown("---")
 
@@ -2593,54 +3636,6 @@ if _admin_visible:
                         admin["disqualified"].remove(dq_key)
                         save_state(admin)
                         st.rerun()
-
-            st.markdown("---")
-
-            # ── Course par override ──
-            st.markdown("**⛳ Course Par**")
-            auto_par_label = f"auto-detected: {course_par}" if auto_par_found else "auto-detect failed — using fallback 72"
-            st.caption(f"Used by Biggest Mover calc. Current value: **{course_par}** ({auto_par_label if not admin.get('course_par') else 'manual override'}). Set to 0 to re-auto-detect.")
-            new_par = st.number_input(
-                "Manual par (0 = auto)",
-                min_value=0, max_value=80,
-                value=int(admin.get("course_par", 0)),
-                step=1, key="par_override"
-            )
-            if new_par != admin.get("course_par", 0):
-                admin["course_par"] = int(new_par)
-                save_state(admin)
-                st.rerun()
-
-            st.markdown("---")
-
-            # ── Tee time / tournament start (for countdown strip) ──
-            st.markdown("**🕐 Tournament Start**")
-            st.caption("Set the first tee-off time. A countdown strip will appear at the top of the app until entries lock. Leave blank to hide.")
-            from datetime import datetime as _dt2, date as _date2, time as _time2
-            cur_start_str = admin.get("tournament_start", "")
-            try:
-                _cs = _dt2.fromisoformat(cur_start_str) if cur_start_str else None
-            except Exception:
-                _cs = None
-            ct1, ct2 = st.columns(2)
-            with ct1:
-                tee_date = st.date_input("First tee date",
-                                         value=_cs.date() if _cs else _date2.today(),
-                                         key="tee_date_input")
-            with ct2:
-                tee_time = st.time_input("First tee time (local)",
-                                         value=_cs.time() if _cs else _time2(7, 0),
-                                         key="tee_time_input")
-            tc1, tc2 = st.columns(2)
-            if tc1.button("💾 Save tee time", key="btn_save_tee"):
-                admin["tournament_start"] = _dt2.combine(tee_date, tee_time).isoformat()
-                save_state(admin)
-                st.success("✓ Tee time saved")
-                st.rerun()
-            if tc2.button("🚫 Clear tee time", key="btn_clear_tee"):
-                admin["tournament_start"] = ""
-                save_state(admin)
-                st.rerun()
 
             st.markdown("---")
 
@@ -2677,84 +3672,102 @@ if _admin_visible:
                     save_state(admin)
                     st.rerun()
 
-            # ── Tee-time debug (so we can see what ESPN actually returns) ──
-            with st.expander("⏰ Tee-time debug", expanded=False):
-                st.caption("Shows which ESPN fields exist for each leaderboard player. "
-                           "Fields tagged [lb] come from the secondary /leaderboard endpoint. "
-                           "If a tee time is visible in the raw JSON below but NOT in the "
-                           "'Extracted tee times' line, copy the JSON to me and I'll wire "
-                           "the right field in.")
-                st.markdown(f"**Extracted tee times ({len(tee_times)})**: `{tee_times}`")
-                st.markdown("---")
-                # Show the first 10 leaderboard players' raw tee-candidate fields
-                for name, _ in espn_lb[:10]:
-                    fields = tee_debug.get(name, {})
-                    # Only keep non-null fields to reduce noise
-                    non_null = {k: v for k, v in fields.items() if v not in (None, "", [])}
-                    st.markdown(f"**{name}**")
-                    if non_null:
-                        for k, v in non_null.items():
-                            st.caption(f"  • `{k}` = `{v}`")
-                    else:
-                        st.caption("  _(all tee-candidate fields empty)_")
-                st.markdown("---")
-                st.markdown("**Full raw JSON for the first player** (every field ESPN sends):")
-                try:
-                    import json as _json
-                    st.code(_json.dumps(first_raw_player, indent=2, default=str)[:6000], language="json")
-                except Exception as _e:
-                    st.caption(f"(JSON dump failed: {_e})")
+            st.markdown("---")
 
-            # ── ESPN debug data ──
-            with st.expander("🔍 ESPN debug data", expanded=False):
-                st.markdown(f"**Current period**: {current_period} &nbsp; | &nbsp; **State**: `{espn_state or '—'}` &nbsp; | &nbsp; **Course par**: {course_par}")
-                if not raw_linescores:
-                    st.warning("No linescore data returned from ESPN. Check TOURNAMENT_ID.")
-                else:
-                    # Show debug rows for each pick of each entry
-                    st.caption("Per-pick round scores (strokes → vs-par). Empty means ESPN hasn't posted that round yet or the value failed the 50–100 stroke guard.")
-                    for r in rows[:10]:  # cap for readability
-                        st.markdown(f"**{r['Name']}** — picks:")
-                        for pname, _ in r["Picks"]:
-                            ls = raw_linescores.get(pname, [])
-                            raw_vals = [row.get("value") for row in ls] if ls else []
-                            computed = rounds_vs_par.get(pname, {})
-                            st.caption(f"• `{pname}` → raw linescores: {raw_vals} · computed vs-par: {computed}")
-                        st.markdown("")
+            # ── Entry Gate — flip to freeze signups once the tournament starts ──
+            st.markdown("**🔒 Entry Gate**")
+            st.caption("When frozen, the Join Pool section is hidden and new entries can't be submitted. Flip this ON once the first group tees off Thursday.")
+            _gate_new = st.toggle(
+                "Freeze entries (signups closed)",
+                value=bool(admin.get("entries_frozen", False)),
+                key="gate_toggle",
+            )
+            if _gate_new != bool(admin.get("entries_frozen", False)):
+                admin["entries_frozen"] = bool(_gate_new)
+                save_state(admin)
+                st.rerun()
 
             st.markdown("---")
 
-            # ── Score overrides ──
-            st.markdown("**✎ Score Overrides**")
-            st.caption("Override a player's score if ESPN data is wrong or they withdrew.")
-            all_players = sorted(score_map.keys()) if score_map else []
-            ov_player = st.selectbox("Player", [""] + all_players, key="ov_player")
-            ov_score  = st.number_input("Score vs par", min_value=-30, max_value=30, value=0, step=1, key="ov_score")
+            # ── Daily Winners override (rare — use only if auto-detect is wrong) ──
+            with st.expander("🏁 Daily Winners (manual override — rare)", expanded=False):
+                st.caption(
+                    "The app auto-picks daily winners from lowest round-only 3-pick delta. "
+                    "Use these only if you need to force a specific name (e.g. tiebreaker "
+                    "decided by count-back or manual pick)."
+                )
+                _all_entry_names = sorted(df_display["Name"].tolist()) if not df_display.empty else []
+                for _day in ["Thursday","Friday","Saturday","Sunday"]:
+                    _cur = admin["daily_winners"].get(_day, "")
+                    _options = [""] + _all_entry_names
+                    _idx = _options.index(_cur) if _cur in _options else 0
+                    _pick = st.selectbox(
+                        f"{_day} winner (blank = auto)",
+                        _options, index=_idx, key=f"dw_{_day}",
+                    )
+                    if _pick != _cur:
+                        admin["daily_winners"][_day] = _pick
+                        save_state(admin)
+                        st.rerun()
 
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("✅ Set Override", key="btn_set") and ov_player:
-                    admin["score_overrides"][ov_player] = int(ov_score)
-                    save_state(admin); st.rerun()
-            with c2:
-                if st.button("🗑 Remove Override", key="btn_clr") and ov_player:
-                    admin["score_overrides"].pop(ov_player, None)
-                    save_state(admin); st.rerun()
+            st.markdown("---")
 
-            if admin["score_overrides"]:
-                st.markdown("**Active overrides:**")
-                for p, v in list(admin["score_overrides"].items()):
-                    rc1, rc2 = st.columns([5,1])
-                    rc1.markdown(f"`{p}` → **{fmt_score(v)}**")
-                    if rc2.button("✕", key=f"rm_{p}"):
-                        admin["score_overrides"].pop(p, None)
+            # ── Score Overrides (rare — only when ESPN is wrong) ──
+            with st.expander("✎ Score Overrides (rare — ESPN correction)", expanded=False):
+                st.caption("Override a player's cumulative score vs par. Use only if ESPN data is wrong or a player withdrew mid-round.")
+                all_players = sorted(score_map.keys()) if score_map else []
+                ov_player = st.selectbox("Player", [""] + all_players, key="ov_player")
+                ov_score  = st.number_input("Score vs par", min_value=-30, max_value=30, value=0, step=1, key="ov_score")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("✅ Set Override", key="btn_set") and ov_player:
+                        admin["score_overrides"][ov_player] = int(ov_score)
                         save_state(admin); st.rerun()
+                with c2:
+                    if st.button("🗑 Remove Override", key="btn_clr") and ov_player:
+                        admin["score_overrides"].pop(ov_player, None)
+                        save_state(admin); st.rerun()
+
+                if admin["score_overrides"]:
+                    st.markdown("**Active overrides:**")
+                    for p, v in list(admin["score_overrides"].items()):
+                        rc1, rc2 = st.columns([5,1])
+                        rc1.markdown(f"`{p}` → **{fmt_score(v)}**")
+                        if rc2.button("✕", key=f"rm_{p}"):
+                            admin["score_overrides"].pop(p, None)
+                            save_state(admin); st.rerun()
+
+            # ══════════════════════════════════════════════════════════
+            # 🏁 WRAP UP (Sunday night / Monday morning)
+            # ══════════════════════════════════════════════════════════
+            st.markdown(
+                '<div class="admin-group wrap">'
+                '<span class="g-title">🏁 Wrap Up</span>'
+                '<span class="g-when">Sun night – Mon</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Close out the week: lock the winner, generate recap, archive to Hall of Fame.")
+
+            # ── Tournament finished toggle ──
+            st.markdown("**✅ Mark Tournament Finished**")
+            st.caption("Flip this ON once Sunday play is over. Locks the Overall winner card and enables the recap.")
+            _fin_new = st.toggle(
+                "Tournament finished",
+                value=bool(admin.get("tournament_finished", False)),
+                key="fin_toggle",
+            )
+            if _fin_new != bool(admin.get("tournament_finished", False)):
+                admin["tournament_finished"] = bool(_fin_new)
+                save_state(admin)
+                st.rerun()
 
             st.markdown("---")
 
             # ── Weekly recap (generate shareable summary text) ──
             st.markdown("**📰 Weekly Recap**")
-            st.caption("Generate a plain-text recap of this week's tournament — daily winners, top 3, biggest movers. Copy it into your group chat when the tournament ends.")
+            st.caption("Generate a plain-text recap of this week's tournament — daily winners, top 3. Copy it into your group chat when the tournament ends.")
             if st.button("📋 Generate recap", key="btn_recap"):
                 recap_lines = []
                 tname = admin.get("tournament_name", "") or "This Week"
@@ -2768,10 +3781,10 @@ if _admin_visible:
                     manual = admin["daily_winners"].get(day, "")
                     if manual:
                         recap_lines.append(f"  • {day}: {manual} — ${daily_payout:.2f}")
-                    elif mover and mover.get("winner"):
+                    elif mover and mover.get("name"):
                         sc = fmt_score(mover["score"]) if mover.get("score") is not None else "—"
                         tie = " (tied)" if mover.get("tied") else ""
-                        recap_lines.append(f"  • {day}: {mover['winner']}{tie} ({sc}) — ${daily_payout:.2f}")
+                        recap_lines.append(f"  • {day}: {mover['name']}{tie} ({sc}) — ${daily_payout:.2f}")
                     else:
                         recap_lines.append(f"  • {day}: —")
                 recap_lines.append("")
@@ -2833,6 +3846,85 @@ if _admin_visible:
                         save_state(admin)
                         st.rerun()
 
+            # ══════════════════════════════════════════════════════════
+            # 🛠 DEBUG & UTILITIES (reach for these only if something's broken)
+            # ══════════════════════════════════════════════════════════
+            st.markdown(
+                '<div class="admin-group debug">'
+                '<span class="g-title">🛠 Debug & Utilities</span>'
+                '<span class="g-when">As needed</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Diagnostic tools and dangerous resets — only touch these if something looks wrong.")
+
+            # ── Tee-time debug (so we can see what ESPN actually returns) ──
+            with st.expander("⏰ Tee-time debug", expanded=False):
+                st.caption("Shows which ESPN fields exist for each leaderboard player. "
+                           "Fields tagged [lb] come from the secondary /leaderboard endpoint. "
+                           "If a tee time is visible in the raw JSON below but NOT in the "
+                           "'Extracted tee times' line, copy the JSON to me and I'll wire "
+                           "the right field in.")
+                st.markdown(f"**Extracted tee times ({len(tee_times)})**: `{tee_times}`")
+                st.markdown("---")
+                # Show the first 10 leaderboard players' raw tee-candidate fields
+                for name, _ in espn_lb[:10]:
+                    fields = tee_debug.get(name, {})
+                    # Only keep non-null fields to reduce noise
+                    non_null = {k: v for k, v in fields.items() if v not in (None, "", [])}
+                    st.markdown(f"**{name}**")
+                    if non_null:
+                        for k, v in non_null.items():
+                            st.caption(f"  • `{k}` = `{v}`")
+                    else:
+                        st.caption("  _(all tee-candidate fields empty)_")
+                st.markdown("---")
+                st.markdown("**Full raw JSON for the first player** (every field ESPN sends):")
+                try:
+                    import json as _json
+                    st.code(_json.dumps(first_raw_player, indent=2, default=str)[:6000], language="json")
+                except Exception as _e:
+                    st.caption(f"(JSON dump failed: {_e})")
+
+            # ── ESPN debug data ──
+            with st.expander("🔍 ESPN debug data", expanded=False):
+                st.markdown(f"**Current period**: {current_period} &nbsp; | &nbsp; **State**: `{espn_state or '—'}` &nbsp; | &nbsp; **Course par**: {course_par}")
+                if not raw_linescores:
+                    st.warning("No linescore data returned from ESPN. Check TOURNAMENT_ID.")
+                else:
+                    # Show debug rows for each pick of each entry
+                    st.caption("Per-pick round scores (strokes → vs-par). Empty means ESPN hasn't posted that round yet or the value failed the 50–100 stroke guard.")
+                    for r in rows[:10]:  # cap for readability
+                        st.markdown(f"**{r['Name']}** — picks:")
+                        for pname, _ in r["Picks"]:
+                            ls = raw_linescores.get(pname, [])
+                            raw_vals = [row.get("value") for row in ls] if ls else []
+                            computed = rounds_vs_par.get(pname, {})
+                            st.caption(f"• `{pname}` → raw linescores: {raw_vals} · computed vs-par: {computed}")
+                        st.markdown("")
+
+            # ── Daily scoring debug — see the actual numbers used for each day's winner ──
+            with st.expander("🏁 Daily scoring debug", expanded=False):
+                st.caption(
+                    "For each entry's picks: shows cumulative vs-par through each round "
+                    "(from score_map or linescores) and the per-round delta used to pick the daily winner. "
+                    "Use this to cross-check when Sunday / Saturday scoring looks off."
+                )
+                for r in rows[:15]:
+                    st.markdown(f"**{r['Name']}**")
+                    for pname, _psc in r["Picks"]:
+                        cums = {}
+                        for _rn in (1, 2, 3, 4):
+                            cums[_rn] = cumulative_vs_par(pname, _rn, rounds_vs_par, score_map, current_period, espn_state)
+                        deltas = {}
+                        for _rn in (1, 2, 3, 4):
+                            deltas[_rn] = round_delta_vs_par(pname, _rn, rounds_vs_par, score_map, current_period, espn_state)
+                        st.caption(
+                            f"• `{pname}` — cum: {cums} · round deltas: {deltas} · "
+                            f"score_map={score_map.get(pname, '—')} · raw_linescores={[row.get('value') for row in raw_linescores.get(pname, [])]}"
+                        )
+                    st.markdown("")
+
             st.markdown("---")
 
             # ── Clear sheet cache ──
@@ -2843,7 +3935,9 @@ if _admin_visible:
 
             st.markdown("---")
 
-            if st.button("⚠️ Reset ALL admin settings"):
+            st.caption("⚠️ **Danger zone** — wipes all admin settings (payments, snapshots, overrides, history). Use only to start fresh.")
+            _reset_ok = st.checkbox("I understand this wipes EVERYTHING", key="confirm_reset_all")
+            if st.button("⚠️ Reset ALL admin settings", disabled=not _reset_ok):
                 st.session_state.admin_state = dict(DEFAULT_STATE)
                 save_state(st.session_state.admin_state)
                 st.rerun()
