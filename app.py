@@ -1,5 +1,4 @@
 import streamlit as st
-st.write("VERSION 3 IS LIVE")
 import streamlit.components.v1 as components
 import pandas as pd
 import requests
