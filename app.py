@@ -1,5 +1,4 @@
 import streamlit as st
-st.write("VERSION 3 IS LIVE")
 import streamlit.components.v1 as components
 import pandas as pd
 import requests
@@ -278,6 +277,38 @@ def _normalize_league_code(raw):
         return ""
     return "".join(c for c in str(raw).upper() if c.isalnum())[:12]
 
+# Reserved vanity codes — system-shadowing words + brand-protect + a small
+# profanity guard. Codes are case-normalized to uppercase before this check.
+_LEAGUE_RESERVED_CODES = {
+    # System / routing
+    "ADMIN","LOGIN","LOGOUT","API","NEW","JOIN","CREATE","DELETE","EDIT",
+    "HELP","ABOUT","SETTINGS","USER","USERS","ROOT","NULL","UNDEFINED",
+    "ERROR","TEST","INDEX","HOME","PUBLIC","LEAGUE","LEAGUES","CODE","CODES",
+    # Brand
+    "CLUBHOUSE","CLUBHOUSEPOOL","POOL",
+    # Light profanity guard
+    "FUCK","SHIT","BITCH","DICK","PUSSY","COCK","FAG",
+    "NIGGER","RETARD","SLUT","WHORE","PORN","SEX","CUM","TWAT",
+}
+
+def _validate_vanity_code(raw, existing_codes):
+    """Validate a user-typed vanity code.
+    Returns (normalized_code, error_msg). If raw is blank, returns ("", None)
+    meaning 'fall back to auto-generated.' If error_msg is set, the caller
+    should NOT use the code."""
+    code = _normalize_league_code(raw)
+    if not code:
+        return "", None     # blank → caller falls back to auto-gen
+    if len(code) < 3:
+        return code, "Custom code must be at least 3 characters."
+    if len(code) > 12:
+        return code, "Custom code must be 12 characters or fewer."
+    if code in _LEAGUE_RESERVED_CODES:
+        return code, f"'{code}' is reserved. Pick something else."
+    if code in existing_codes:
+        return code, f"'{code}' is already taken. Try another."
+    return code, None
+
 # ── Parse ?league=CODE URL param (early, so every subsequent section knows) ──
 _current_league_code = ""
 try:
@@ -334,6 +365,64 @@ def _join_league(email, code):
             _members.append(e)
     save_state(admin)
 
+def _render_join_by_code_inline(_admin):
+    """'Have a league code?' expander.
+    Renders as a Streamlit expander so it visually matches the
+    'Start a private league' expander right next to it — both are
+    rounded rows with a chevron, no mixing of buttons and dropdowns.
+    Lets a friend who heard about a league verbally (no link) jump into
+    it by typing the code their buddy gave them. On valid match we set
+    the `league` query param and rerun, which routes them into the
+    league view.
+    """
+    with st.expander("🔑  Have a league code? Join here", expanded=False):
+        st.markdown(
+            "<div style='color:#a7c9a7; font-size:0.88rem; line-height:1.5; margin-bottom:8px;'>"
+            "Friend gave you a code over text or in person? Type it below "
+            "and we'll drop you into their league."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        _jc1, _jc2 = st.columns([3, 1])
+        with _jc1:
+            _typed = st.text_input(
+                "League code",
+                key="join_by_code_input",
+                placeholder="e.g. TIGER",
+                max_chars=12,
+                label_visibility="collapsed",
+            )
+        with _jc2:
+            _go = st.button(
+                "Join league",
+                key="btn_do_join_by_code",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if _go:
+            _norm = _normalize_league_code(_typed or "")
+            if not _norm:
+                st.error("Please type a league code.")
+            else:
+                _all_codes = set((_admin.get("leagues") or {}).keys())
+                if _norm not in _all_codes:
+                    st.error(
+                        f"No league found with code '{_norm}'. "
+                        "Double-check the spelling with your friend."
+                    )
+                else:
+                    # Route into the league view via query param so it sticks on refresh.
+                    try:
+                        st.query_params["league"] = _norm
+                    except Exception:
+                        try:
+                            st.experimental_set_query_params(league=_norm)
+                        except Exception:
+                            pass
+                    st.session_state.pop("join_by_code_input", None)
+                    st.rerun()
+
 def _league_entry_fee(code):
     """Return the per-entry $ fee for this league, or ENTRY_FEE for public pool."""
     if not code:
@@ -372,7 +461,14 @@ html, body, [class*="css"] {
 .st-key-hero_left [data-testid="element-container"] { margin-bottom: 0 !important; }
 .st-key-hero_left [data-testid="element-container"]:not(:last-child) { margin-bottom: 0 !important; }
 
+/* Title block is a normal block-level container (not centered) so the title
+   anchors at the left of the hero column, directly above the Join Pool
+   button. The .title-inner wrapper is an inline-block that shrink-wraps
+   to the title's width, which means the subtitle + pitch (block children
+   of title-inner with text-align:center) end up centered UNDER just the
+   title text, not floating across the whole column. */
 .title-block { padding-top: 10px; margin: 0 0 14px 0; }
+.title-inner { display: inline-block; }
 .main-title {
     font-family: 'Playfair Display', serif;
     font-size: clamp(1.8rem, 5vw, 3rem);
@@ -384,17 +480,41 @@ html, body, [class*="css"] {
     max-width: 100%;
     margin: 0;
 }
-.main-subtitle { font-size:0.75rem; color:#4a6b4a; letter-spacing:3px; text-transform:uppercase; margin-top:6px; }
-.main-subtitle .subtitle-tourney {
+/* Tournament-name subtitle: same small size as before, but now plain white
+   and centered under the title text (via title-inner's inline-block wrap). */
+.main-subtitle {
+    font-size: 0.75rem;
+    color: #ffffff;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-top: 6px;
+    text-align: center;
+}
+/* One-line pitch under subtitle — headlines the round-winners
+   differentiator. The "mp-hook" span is the emphasized phrase. */
+.main-pitch {
+    margin-top: 8px;
+    font-size: 0.9rem;
+    color: #a7c9a7;
+    font-weight: 400;
+    line-height: 1.45;
+    max-width: 520px;
+    margin-left: auto;
+    margin-right: auto;
+    text-align: center;
+}
+.main-pitch .mp-hook {
     color: #d4af37;
     font-weight: 700;
-    letter-spacing: 2px;
-    margin-left: 6px;
+    letter-spacing: 0.2px;
 }
-.main-subtitle .subtitle-sep {
-    color: #2a3d2a;
-    margin: 0 6px;
-    font-weight: 400;
+@media (max-width: 640px) {
+    .main-pitch {
+        font-size: 0.82rem;
+        max-width: 100%;
+        margin-top: 6px;
+        line-height: 1.4;
+    }
 }
 
 .stat-box {
@@ -1597,8 +1717,8 @@ def hof_badge_html(email, history):
         count_label = f'<span class="hof-count">×{ov}</span>' if ov > 1 else ""
         parts.append(f'<span class="hof-badge" title="Overall wins: {ov}">👑</span>{count_label}')
     if dw >= 3:
-        # Only show daily-win badge if they have real hardware
-        parts.append(f'<span class="hof-badge" title="Daily wins: {dw}">⭐</span><span class="hof-count">×{dw}</span>')
+        # Only show round-win badge if they have real hardware
+        parts.append(f'<span class="hof-badge" title="Round wins: {dw}">⭐</span><span class="hof-count">×{dw}</span>')
     return "".join(parts)
 
 def position_delta_html(cur_rank, prev_rank):
@@ -2148,7 +2268,7 @@ overall_payout = round(pot * OVERALL_PCT, 2)
 
 # ---------------------------------------------------------------
 # Per-round delta scoring:
-#   Daily winner for Day N = lowest 3-pick combined DELTA for round N only.
+#   Round winner for Round N = lowest 3-pick combined DELTA for round N only.
 #   (Friday's score = sum of each pick's Round-2-only vs-par, NOT cumulative.)
 #
 #   Implementation: compute cumulative_through_R_N  -  cumulative_through_R_(N-1).
@@ -2331,20 +2451,22 @@ with col_title:
         _hero_left = st.container()
 
 with _hero_left:
-    # Title + subtitle (with inline tournament name) in a SINGLE markdown block
-    # so no inter-element Streamlit gap — and the title block keeps the same
-    # overall height whether a tournament is set or not, so the Join Pool
-    # button stays aligned with the How It Works expander on the right.
+    # Hero copy is intentionally minimal: just the brand, the tournament,
+    # and a single one-line value prop (the round-winners hook). The Join
+    # Pool button below carries the entry fee, so we don't repeat it here.
+    # The .title-inner wrapper shrink-wraps to the title's width so the
+    # subtitle + pitch center UNDER the title text, not across the column.
     _tourney_name = (admin.get("tournament_name", "") or "").strip()
-    _tourney_inline = (
-        f'<span class="subtitle-sep">·</span>'
-        f'<span class="subtitle-tourney">{_tourney_name}</span>'
-        if _tourney_name else ""
+    _subtitle_html = (
+        f'<div class="main-subtitle">{_tourney_name}</div>' if _tourney_name else ""
     )
     st.markdown(
         '<div class="title-block">'
+        '<div class="title-inner">'
         '<div class="main-title">⛳ The Clubhouse Pool</div>'
-        f'<div class="main-subtitle">Weekly Golf Pool{_tourney_inline}</div>'
+        f'{_subtitle_html}'
+        f'<div class="main-pitch">Pick 3 golfers · <strong class="mp-hook">multiple round winners</strong></div>'
+        '</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -2380,14 +2502,10 @@ with _hero_left:
             # Invite-a-friend share block under the CTA
             render_share_block(variant="default")
 
-            # ── "or start your own league" CTA (only on public pool view) ──
-            # Using st.caption instead of raw HTML to avoid any chance of
-            # Streamlit's markdown parser leaking a stray </div> onto the page.
-            if not current_league:
-                st.markdown(
-                    '<div class="create-league-cta">Playing with friends? <strong>Start a private league</strong> below ↓</div>',
-                    unsafe_allow_html=True,
-                )
+            # League CTAs (Create / Join-by-code) intentionally live OUTSIDE
+            # the hero column, grouped as sibling expanders below — that way
+            # they render at the same width with the same visual pattern,
+            # instead of a mismatched button-in-hero + expander-below layout.
 
             # Dynamically match the Join Pool button's width to the main title
             # so its right edge lands exactly where "Pool" ends.
@@ -2467,7 +2585,7 @@ with col_stats:
 • Your <strong>score = sum of all 3 picks</strong> vs par. Low score wins.<br>
 
 <br><strong style="color:#fff;">Payouts</strong><br>
-• <strong>Daily winner</strong> (lowest 3-pick total that day): <strong>{int(DAILY_PCT*100)}% of pot</strong> × 4 days (Thu / Fri / Sat / Sun).<br>
+• <strong>Round winner</strong> (lowest 3-pick total that round): <strong>{int(DAILY_PCT*100)}% of pot</strong> × 4 rounds (Thu / Fri / Sat / Sun).<br>
 • <strong>Overall winner</strong> (lowest total after Sunday): <strong>{int(OVERALL_PCT*100)}% of pot</strong>.<br>
 • Ties split evenly.<br>
 
@@ -2477,7 +2595,7 @@ If one of your picks gets cut, they get the <strong>cut score</strong> applied f
 <br><strong style="color:#fff;">Schedule</strong><br>
 • Entries open <strong>Monday night</strong> through <strong>Thursday tee-off</strong>.<br>
 • Picks lock when the first group tees off Thursday.<br>
-• Winners posted daily; overall payouts go out Sunday night.<br>
+• Winners posted each round; overall payouts go out Sunday night.<br>
 
 <br><strong style="color:#fff;">Withdrawals</strong><br>
 If a pick WDs before the tournament starts, reach out — we'll swap. Once it starts, no subs.<br>
@@ -2550,6 +2668,18 @@ if not admin["entries_frozen"]:
             )
             st.markdown(brag_html, unsafe_allow_html=True)
             st.caption("📸 Screenshot this card and share it to your group chat — start the trash talk.")
+
+        # Come-back hook — builds anticipation so they return for each round
+        st.markdown(
+            '<div style="background:linear-gradient(135deg,#1a2f1a 0%,#0f1f0f 100%);'
+            'border:1px solid #2d5a3d;border-radius:10px;padding:14px 16px;'
+            'margin:14px 0 10px 0;color:#c7e3c7;font-size:0.95rem;line-height:1.55;">'
+            '🏆 <strong style="color:#fff;">Check back each night</strong> · '
+            'A new round winner gets paid Thu / Fri / Sat / Sun · '
+            'plus the overall champ Sunday.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
         # Post-entry share — stoke is highest right after someone submits
         render_share_block(variant="compact")
@@ -2700,7 +2830,10 @@ if not admin["entries_frozen"]:
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
-# CREATE A LEAGUE  (only shown on public pool view, not inside an active league)
+# LEAGUES  —  Create + Join-by-code, rendered as twin expanders so the
+# two CTAs look identical instead of a button+dropdown mismatch.
+# Leagues are a key viral hook — seeing friends create them drives more
+# invites — so they're always visible on the public pool view.
 # ============================================================
 if not current_league and not admin.get("entries_frozen"):
     with st.expander("🏆  Start a private league with your friends", expanded=False):
@@ -2735,6 +2868,15 @@ if not current_league and not admin.get("entries_frozen"):
             help="We use this to mark you as the league's creator.",
         )
 
+        _cl_custom_code = st.text_input(
+            "Custom code (optional)",
+            key="create_league_custom_code",
+            placeholder="e.g. TIGER, DADSPOOL, SQUAD26",
+            max_chars=12,
+            help="Make it memorable so friends can join by typing the code. "
+                 "3-12 letters/numbers. Leave blank for an auto-generated code.",
+        )
+
         _cl_submit = st.button(
             "Create League",
             key="btn_create_league",
@@ -2750,13 +2892,23 @@ if not current_league and not admin.get("entries_frozen"):
                 _errs.append("League name is required.")
             if not _em or "@" not in _em or "." not in _em.split("@")[-1]:
                 _errs.append("A valid email is required.")
+
+            # Validate optional vanity code BEFORE we mint anything
+            _existing = set((admin.get("leagues") or {}).keys())
+            _typed_code = _cl_custom_code or ""
+            _vanity_code, _vanity_err = _validate_vanity_code(_typed_code, _existing)
+            if _vanity_err:
+                _errs.append(_vanity_err)
+
             if _errs:
                 for _e in _errs:
                     st.error(_e)
             else:
-                # Mint a fresh code
-                _existing = set((admin.get("leagues") or {}).keys())
-                _new_code = _generate_league_code(_existing)
+                # Use the vanity code if one was supplied, else auto-mint
+                if _vanity_code:
+                    _new_code = _vanity_code
+                else:
+                    _new_code = _generate_league_code(_existing)
 
                 # Persist the league
                 from datetime import datetime as _dt_lg
@@ -2802,18 +2954,24 @@ if not current_league and not admin.get("entries_frozen"):
                 st.session_state.pop(_k, None)
             st.rerun()
 
+# Join-by-code — sibling expander to Create-a-league. Shown even when
+# entries are locked (a late friend can still pull up a league's scoped
+# standings by typing the code their buddy gave them).
+if not current_league:
+    _render_join_by_code_inline(admin)
+
 # ============================================================
 # POOL STANDINGS
 # ============================================================
-_ps_tname = (admin.get("tournament_name", "") or "").strip()
-_ps_suffix = f' <span class="section-sub">· {_ps_tname}</span>' if _ps_tname else ""
 # In a private league, the section title reflects the league name instead
 # of the generic "Pool Standings" label so the view feels scoped.
+# Tournament name intentionally NOT repeated here — it's already in the
+# hero subtitle, so showing it again would just add visual noise.
 if current_league:
     _ps_heading = f'{current_league.get("name","League")} Standings'
 else:
     _ps_heading = "Pool Standings"
-st.markdown(f'<div class="section-title">{_ps_heading}{_ps_suffix}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="section-title">{_ps_heading}</div>', unsafe_allow_html=True)
 
 # ---- "Who are you?" identity strip (persists across rerenders via session state) ----
 # Auto-seed from entry submission or returning-user lookup if we have that info.
@@ -3030,9 +3188,12 @@ else:
         )
     else:
         st.markdown(
-            '<div style="text-align:center;padding:60px 20px;color:#4a6b4a;">'
-            '<div style="font-size:2rem;">⛳</div>'
-            '<div style="font-family:\'Playfair Display\',serif;font-size:1.2rem;color:#fff;margin-top:8px;">No entries yet</div>'
+            '<div style="text-align:center;padding:48px 20px 40px 20px;color:#4a6b4a;">'
+            '<div style="font-size:2.2rem;">⛳</div>'
+            '<div style="font-family:\'Playfair Display\',serif;font-size:1.35rem;color:#fff;margin-top:8px;">Be the first to lock in picks</div>'
+            '<div style="margin-top:10px;font-size:0.95rem;color:#a7c9a7;max-width:420px;margin-left:auto;margin-right:auto;line-height:1.55;">'
+            '4 round winners get paid (Thu · Fri · Sat · Sun) plus the overall champ Sunday night.'
+            '</div>'
             '</div>',
             unsafe_allow_html=True
         )
@@ -3042,7 +3203,7 @@ st.markdown('<hr class="divider">', unsafe_allow_html=True)
 # ============================================================
 # WINNERS
 # ============================================================
-st.markdown('<div class="section-title">Winners</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Round Winners<span class="section-sub">· a new winner Thu · Fri · Sat · Sun</span></div>', unsafe_allow_html=True)
 
 cards_html = ""
 for day in ["Thursday","Friday","Saturday","Sunday"]:
@@ -3446,7 +3607,7 @@ if _admin_visible:
 
             # ── Start new tournament (the BIG reset — do this last) ──
             st.markdown("**🔄 Start New Tournament** _(do this last, after tier list + tee time are set)_")
-            st.caption("Clears last week's entries from the board (cutoff by timestamp — nothing deleted from the sheet). Resets daily winners and tournament status.")
+            st.caption("Clears last week's entries from the board (cutoff by timestamp — nothing deleted from the sheet). Resets round winners and tournament status.")
             new_tourney_name = st.text_input(
                 "New tournament name (optional)",
                 placeholder="e.g. Cadillac Invitational 2026",
@@ -3690,10 +3851,10 @@ if _admin_visible:
 
             st.markdown("---")
 
-            # ── Daily Winners override (rare — use only if auto-detect is wrong) ──
-            with st.expander("🏁 Daily Winners (manual override — rare)", expanded=False):
+            # ── Round Winners override (rare — use only if auto-detect is wrong) ──
+            with st.expander("🏁 Round Winners (manual override — rare)", expanded=False):
                 st.caption(
-                    "The app auto-picks daily winners from lowest round-only 3-pick delta. "
+                    "The app auto-picks round winners from lowest round-only 3-pick delta. "
                     "Use these only if you need to force a specific name (e.g. tiebreaker "
                     "decided by count-back or manual pick)."
                 )
@@ -3768,7 +3929,7 @@ if _admin_visible:
 
             # ── Weekly recap (generate shareable summary text) ──
             st.markdown("**📰 Weekly Recap**")
-            st.caption("Generate a plain-text recap of this week's tournament — daily winners, top 3. Copy it into your group chat when the tournament ends.")
+            st.caption("Generate a plain-text recap of this week's tournament — round winners, top 3. Copy it into your group chat when the tournament ends.")
             if st.button("📋 Generate recap", key="btn_recap"):
                 recap_lines = []
                 tname = admin.get("tournament_name", "") or "This Week"
@@ -3776,7 +3937,7 @@ if _admin_visible:
                 recap_lines.append("")
                 recap_lines.append(f"💰 Pot: ${pot}  ·  {len(rows)} entries")
                 recap_lines.append("")
-                recap_lines.append("🏁 Daily Winners")
+                recap_lines.append("🏁 Round Winners")
                 for day in ["Thursday","Friday","Saturday","Sunday"]:
                     mover = daily_movers.get(day)
                     manual = admin["daily_winners"].get(day, "")
@@ -3904,11 +4065,11 @@ if _admin_visible:
                             st.caption(f"• `{pname}` → raw linescores: {raw_vals} · computed vs-par: {computed}")
                         st.markdown("")
 
-            # ── Daily scoring debug — see the actual numbers used for each day's winner ──
-            with st.expander("🏁 Daily scoring debug", expanded=False):
+            # ── Round scoring debug — see the actual numbers used for each round's winner ──
+            with st.expander("🏁 Round scoring debug", expanded=False):
                 st.caption(
                     "For each entry's picks: shows cumulative vs-par through each round "
-                    "(from score_map or linescores) and the per-round delta used to pick the daily winner. "
+                    "(from score_map or linescores) and the per-round delta used to pick the round winner. "
                     "Use this to cross-check when Sunday / Saturday scoring looks off."
                 )
                 for r in rows[:15]:
