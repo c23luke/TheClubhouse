@@ -2330,16 +2330,6 @@ ROUND_TO_DAY = {1: "Thursday", 2: "Friday", 3: "Saturday", 4: "Sunday"}
 # ============================================================
 # BUILD POOL ROWS
 # ============================================================
-# Apply cutoff time: hide entries submitted before the cutoff (previous tournament's entries)
-cutoff_str = admin.get("entry_cutoff_time", "")
-if cutoff_str and "Timestamp" in df.columns:
-    try:
-        df["__ts"] = pd.to_datetime(df["Timestamp"], errors="coerce")
-        cutoff_dt = pd.to_datetime(cutoff_str)
-        df = df[df["__ts"].isna() | (df["__ts"] >= cutoff_dt)]
-    except Exception:
-        pass
-
 # Apply disqualification list (hide entries flagged by admin)
 dq_set = set(admin.get("disqualified", []))
 paid_map = admin.get("paid_entries", {}) or {}
@@ -3851,16 +3841,14 @@ You're now ready to loop back to <strong>🆕 Setup</strong> for next week's tou
 
             # ── Start new tournament (the BIG reset — do this last) ──
             st.markdown("**🔄 Start New Tournament** _(do this last, after tiers + tee time are set)_")
-            st.caption("Clears last week's entries from the board (cutoff by timestamp — nothing deleted from the sheet). Resets round winners and tournament status. **Hall of Fame is preserved** — past champions stay forever.")
+            st.caption("Resets round winners, payment tracking, and tournament status for the new week. **Hall of Fame is preserved** — past champions stay forever. To clear last week's entries from the board, **delete those rows from your Google Sheet** before clicking this.")
             new_tourney_name = st.text_input(
                 "New tournament name (optional)",
                 placeholder="e.g. Cadillac Invitational 2026",
                 key="new_tourney_name"
             )
-            confirm_reset = st.checkbox("I understand this will hide all current entries", key="confirm_reset")
+            confirm_reset = st.checkbox("I understand this will reset round winners and payment tracking", key="confirm_reset")
             if st.button("🔄 Start New Tournament", key="btn_new_tourney", disabled=not confirm_reset):
-                from datetime import datetime as _dt
-                admin["entry_cutoff_time"]   = _dt.now().isoformat()
                 admin["daily_winners"]       = {"Thursday":"","Friday":"","Saturday":"","Sunday":""}
                 admin["score_overrides"]     = {}
                 admin["tournament_finished"] = False
@@ -3873,34 +3861,7 @@ You're now ready to loop back to <strong>🆕 Setup</strong> for next week's tou
                     admin["tournament_name"] = new_tourney_name.strip()
                 save_state(admin)
                 load_sheet.clear()
-                st.success("✓ New tournament started — board is clean.")
-                st.rerun()
-
-            # ── Bump cutoff only (mid-tournament rescue) ──
-            st.markdown("---")
-            st.markdown("**🕐 Restore Cutoff (mid-tournament rescue)**")
-            st.caption(
-                "Use this if you pushed a code update during a live tournament and last week's entries flashed back in. "
-                "ONLY updates the cutoff filter — does NOT touch daily winners, paid entries, or any other state. "
-                "Pick a time after last week's tournament ended but before this week's first entry was submitted."
-            )
-            from datetime import datetime as _dt2, date as _date3, time as _time3
-            _existing_cutoff = admin.get("entry_cutoff_time", "") or ""
-            try:
-                _ec_dt = _dt2.fromisoformat(_existing_cutoff) if _existing_cutoff else _dt2.now()
-            except Exception:
-                _ec_dt = _dt2.now()
-            _col_cd, _col_ct = st.columns(2)
-            with _col_cd:
-                _bump_date = st.date_input("Cutoff date", value=_ec_dt.date(), key="bump_cutoff_date")
-            with _col_ct:
-                _bump_time = st.time_input("Cutoff time", value=_ec_dt.time().replace(microsecond=0), key="bump_cutoff_time")
-            if st.button("🕐 Set cutoff to this time", key="btn_bump_cutoff"):
-                _new_cutoff = _dt2.combine(_bump_date, _bump_time).isoformat()
-                admin["entry_cutoff_time"] = _new_cutoff
-                save_state(admin)
-                load_sheet.clear()
-                st.success(f"✓ Cutoff set to {_new_cutoff}. Daily winners, paid entries, and all other state untouched.")
+                st.success("✓ New tournament started — daily winners reset, leaderboard pulls live from your Google Sheet. To clear last week's entries, delete those rows from the Sheet.")
                 st.rerun()
 
             # ── Private Leagues (view / rename / delete) ──
