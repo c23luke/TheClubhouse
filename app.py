@@ -71,7 +71,7 @@ components.html("""
 # ============================================================
 # CONFIG
 # ============================================================
-TOURNAMENT_ID = "401811942"
+TOURNAMENT_ID = "401811944"
 ENTRY_FEE     = 10
 DAILY_PCT     = 0.15
 OVERALL_PCT   = 0.40
@@ -2010,6 +2010,157 @@ def _collect_tee_fields(p):
         pass
     return out
 
+def list_upcoming_pga_tournaments():
+    """Hit ESPN's PGA scoreboard endpoint with no event filter to get the
+    current/upcoming tournament list. Returns a list of dicts:
+    [{id, name, start, end, status}, ...] sorted by start date.
+    Empty list on failure."""
+    out = []
+    try:
+        # Bare scoreboard returns the current week's event(s) by default.
+        # The PGA Tour schedule endpoint lists the full season.
+        for url in (
+            "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard",
+            "https://site.web.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=2026",
+        ):
+            try:
+                data = requests.get(url, timeout=10).json()
+            except Exception:
+                continue
+            evs = data.get("events") or []
+            for ev in evs:
+                eid = str(ev.get("id") or "")
+                if not eid:
+                    continue
+                name = ev.get("name") or ev.get("shortName") or "(unnamed)"
+                start = (ev.get("date") or "")[:10]
+                end_str = ""
+                try:
+                    end_str = (ev.get("competitions", [{}])[0].get("endDate", "") or "")[:10]
+                except Exception:
+                    pass
+                status = ""
+                try:
+                    status = (ev.get("status") or {}).get("type", {}).get("description", "")
+                except Exception:
+                    status = ""
+                # Dedupe (the two endpoints overlap)
+                if any(o["id"] == eid for o in out):
+                    continue
+                out.append({
+                    "id": eid, "name": name, "start": start,
+                    "end": end_str or start, "status": status or "Scheduled"
+                })
+        out.sort(key=lambda x: x["start"])
+    except Exception:
+        pass
+    return out
+
+def update_tier_lists_in_source(t1, t2, t3):
+    """Rewrite the TIER_1 / TIER_2 / TIER_3 blocks at the top of app.py.
+    Each tier is a list of strings. Streamlit hot-reloads on save.
+    Returns (success_bool, message_str).
+    Defensive: requires all three blocks to be present and replaceable in one
+    pass — won't write anything if the file shape doesn't match."""
+    import re as _re_, os as _os_
+    if not (isinstance(t1, list) and isinstance(t2, list) and isinstance(t3, list)):
+        return (False, "Internal error: tiers must be lists.")
+    if not t1 or not t2 or not t3:
+        return (False, "All three tiers must have at least one player.")
+    def _fmt(name):
+        # Escape any double-quotes in golfer names (rare, but safe)
+        return '    "' + str(name).replace('"', '\\"') + '",'
+    def _block(varname, names):
+        return varname + " = [\n" + "\n".join(_fmt(n) for n in names) + "\n]"
+    try:
+        _path = _os_.path.realpath(__file__)
+        with open(_path, "r", encoding="utf-8") as _f:
+            src = _f.read()
+        # Each tier block matches: TIER_X = [   …any lines…   ]
+        # We use a non-greedy match across lines to grab just that block.
+        # Order matters — we replace TIER_3 first, then TIER_2, then TIER_1
+        # so earlier replacements can't accidentally overlap into later ones.
+        def _sub_one(s, varname, names):
+            pattern = rf'^{varname}\s*=\s*\[[\s\S]*?^\]'
+            new_block = _block(varname, names)
+            return _re_.subn(pattern, new_block, s, count=1, flags=_re_.MULTILINE)
+        new_src, n3 = _sub_one(src, "TIER_3", t3)
+        new_src, n2 = _sub_one(new_src, "TIER_2", t2)
+        new_src, n1 = _sub_one(new_src, "TIER_1", t1)
+        if not (n1 == n2 == n3 == 1):
+            return (False, f"Couldn't locate all three TIER blocks (matched: T1={n1} T2={n2} T3={n3}). Edit manually.")
+        with open(_path, "w", encoding="utf-8") as _f:
+            _f.write(new_src)
+        return (True, f"✓ Updated TIER_1 ({len(t1)}), TIER_2 ({len(t2)}), TIER_3 ({len(t3)}) — app will hot-reload.")
+    except Exception as _e:
+        return (False, f"Write failed: {_e}")
+
+def update_tournament_id_in_source(new_id):
+    """Rewrite the `TOURNAMENT_ID = "…"` line at the top of app.py with a new
+    value. Streamlit's file watcher will hot-reload the app on next rerun.
+    Returns (success_bool, message_str).
+    Defensive: only accepts digit-only IDs, and only rewrites if exactly one
+    matching line is found (so it won't accidentally clobber unrelated code)."""
+    import re as _re_, os as _os_
+    new_id = str(new_id).strip()
+    if not new_id.isdigit():
+        return (False, "Tournament ID must be digits only.")
+    try:
+        _path = _os_.path.realpath(__file__)
+        with open(_path, "r", encoding="utf-8") as _f:
+            src = _f.read()
+        new_src, n = _re_.subn(
+            r'^TOURNAMENT_ID\s*=\s*"[^"]*"',
+            f'TOURNAMENT_ID = "{new_id}"',
+            src,
+            count=1,
+            flags=_re_.MULTILINE,
+        )
+        if n != 1:
+            return (False, "Couldn't locate the TOURNAMENT_ID line in app.py — edit it manually.")
+        with open(_path, "w", encoding="utf-8") as _f:
+            _f.write(new_src)
+        return (True, f"✓ TOURNAMENT_ID updated to {new_id} — app will hot-reload.")
+    except Exception as _e:
+        return (False, f"Write failed: {_e}")
+
+def fetch_tournament_meta(event_id):
+    """Hit ESPN's leaderboard endpoint and return (name, date_str, status, n_players)
+    for a given event_id — used by admin's Tournament ID verifier so the operator
+    can sanity-check that the constant in app.py points at the right tournament.
+    Returns (None, None, None, 0) on failure."""
+    try:
+        url = f"https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?event={event_id}"
+        data = requests.get(url, timeout=10).json()
+        ev = None
+        # Schema varies — try common shapes
+        if isinstance(data.get("events"), list) and data["events"]:
+            ev = data["events"][0]
+        elif data.get("name") or data.get("date"):
+            ev = data
+        if not ev:
+            return (None, None, None, 0)
+        name = ev.get("name") or ev.get("shortName") or "(unnamed)"
+        date_raw = ev.get("date") or ""
+        # ESPN dates are ISO; just take YYYY-MM-DD for display
+        date_str = date_raw[:10] if date_raw else "?"
+        status = ""
+        try:
+            status = (ev.get("status") or {}).get("type", {}).get("description", "") \
+                  or (ev.get("competitions", [{}])[0].get("status") or {}).get("type", {}).get("description", "")
+        except Exception:
+            status = ""
+        # Player count
+        n_players = 0
+        try:
+            comps = ev.get("competitions", [{}])[0].get("competitors", [])
+            n_players = len(comps)
+        except Exception:
+            pass
+        return (name, date_str, status or "Unknown", n_players)
+    except Exception:
+        return (None, None, None, 0)
+
 def _fetch_tee_times_leaderboard():
     """Secondary ESPN endpoint — the leaderboard API usually has richer per-player
     data including tee times, where the scoreboard endpoint doesn't. Returns a
@@ -3494,9 +3645,9 @@ if _admin_visible:
 <div style="background:#1a2a1a; border-left:3px solid #d4af37; padding:10px 14px; border-radius:6px; margin-bottom:10px;">
 <strong style="color:#d4af37;">🆕 Mon – Wed · Setup</strong>
 <ol style="margin:6px 0 0 18px; padding:0;">
-<li>Send the new tournament's <strong>field</strong> to Claude.</li>
-<li>Claude updates the <code>TIER_1 / TIER_2 / TIER_3</code> blocks in <code>app.py</code> (split evenly into 3).</li>
-<li>You mirror those same names into the Google Form's three pick-question dropdowns.</li>
+<li>Open <strong>🆔 Tournament ID</strong> → click <strong>🔎 List upcoming PGA tournaments</strong>, then hit <strong>📌 Use this ID</strong> next to this week's event (auto-updates <code>app.py</code>).</li>
+<li>Open <strong>📋 Tier-List Helper</strong> → paste this week's field (in world-rank order) → click <strong>⚡ Auto-split + update app.py</strong>. It splits evenly into 3 (remainder goes to Tier 3) and rewrites the tier blocks for you.</li>
+<li>Copy each of the 3 dropdown blocks the helper shows and paste them into the matching Google Form pick-question's options.</li>
 <li>Open <strong>🕐 First Tee Time</strong> and set Thursday's first group.</li>
 <li>Click <strong>🔄 Start New Tournament</strong> → wipes last week's board. Hall of Fame stays intact.</li>
 </ol>
@@ -3551,6 +3702,120 @@ You're now ready to loop back to <strong>🆕 Setup</strong> for next week's tou
                 unsafe_allow_html=True,
             )
             st.caption("Run these Mon–Wed to prep for Thursday.")
+
+            # ── Tournament ID picker — list ESPN's schedule, one click to set ──
+            with st.expander(f"🆔 Tournament ID  ·  current: {TOURNAMENT_ID}", expanded=False):
+                st.caption(
+                    "ESPN's event ID drives scores, tee times, and the field. Each new tournament "
+                    "gets a new one. Click below to pull ESPN's full PGA schedule — then hit "
+                    "**📌 Use this ID** on this week's event and `app.py` updates itself."
+                )
+
+                if st.button("🔎 List upcoming PGA tournaments", key="btn_list_pga", use_container_width=True, type="primary"):
+                    with st.spinner("Asking ESPN for the PGA schedule…"):
+                        st.session_state["_pga_schedule"] = list_upcoming_pga_tournaments()
+
+                _events = st.session_state.get("_pga_schedule")
+                if _events is not None:
+                    if not _events:
+                        st.error("ESPN returned no events. The API might be down — try again in a minute.")
+                    else:
+                        st.success(f"Found **{len(_events)}** events. Hit **📌 Use this ID** on this week's tournament:")
+                        for _i, _ev in enumerate(_events):
+                            _is_match = (_ev["id"] == str(TOURNAMENT_ID))
+                            _star = " ⭐" if _is_match else ""
+                            _r1, _r2 = st.columns([5, 2])
+                            with _r1:
+                                st.markdown(
+                                    f"`{_ev['id']}` — **{_ev['name']}**{_star}  \n"
+                                    f"<span style='color:#a7c9a7;font-size:0.85rem;'>"
+                                    f"📅 {_ev['start']} → {_ev['end']}  ·  {_ev['status']}"
+                                    f"</span>",
+                                    unsafe_allow_html=True,
+                                )
+                            with _r2:
+                                if _is_match:
+                                    st.markdown(
+                                        "<div style='color:#4ade80;font-size:0.85rem;padding-top:6px;'>✅ active</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                else:
+                                    if st.button("📌 Use this ID", key=f"btn_use_tid_{_ev['id']}_{_i}", use_container_width=True):
+                                        ok, msg = update_tournament_id_in_source(_ev["id"])
+                                        if ok:
+                                            st.success(msg)
+                                            st.session_state.pop("_pga_schedule", None)
+                                            st.rerun()
+                                        else:
+                                            st.error(msg)
+                        st.caption("If you don't see this week's tournament in the list, send Claude the ID and he'll update it manually.")
+
+            # ── Tier-List Helper — paste field, auto-split into 3, auto-update app.py ──
+            with st.expander("📋 Tier-List Helper — paste field, auto-update tiers", expanded=False):
+                st.caption(
+                    "Paste this week's field below — one golfer per line (or comma-separated). "
+                    "The tool strips junk (rank numbers, odds, '+' signs), splits the field "
+                    "evenly into 3 tiers in the order you pasted (so paste in world-rank order), "
+                    "then writes the new `TIER_1 / TIER_2 / TIER_3` blocks straight into `app.py`. "
+                    "Any odd remainder goes to **Tier 3**. After it updates, paste the same names "
+                    "into your Google Form's three pick-question dropdowns to keep them in sync."
+                )
+                _field_text = st.text_area(
+                    "Paste field (one per line, or with ranks/odds — we'll clean it)",
+                    height=240, key="tier_field_text",
+                    placeholder="1. Scottie Scheffler +350\n2. Rory McIlroy +700\n..."
+                )
+
+                if st.button("⚡ Auto-split + update app.py", key="btn_build_tiers", type="primary", use_container_width=True):
+                    import re as _re
+                    lines = [ln.strip() for ln in (_field_text or "").splitlines() if ln.strip()]
+                    if len(lines) == 1 and "," in lines[0]:
+                        lines = [x.strip() for x in lines[0].split(",") if x.strip()]
+                    cleaned = []
+                    seen = set()
+                    for ln in lines:
+                        s = _re.sub(r"^(t?\d+[\.\)]?\s*)", "", ln, flags=_re.I)
+                        s = _re.sub(r"\s*[+\-]\d+\s*$", "", s)
+                        s = _re.sub(r"\s*\([^)]*\)\s*$", "", s)
+                        s = _re.sub(r"\s+[A-Z]{3}\s*$", "", s)
+                        s = s.strip().strip(",").strip()
+                        if s and s.lower() not in seen:
+                            seen.add(s.lower())
+                            cleaned.append(s)
+                    if not cleaned:
+                        st.warning("No names parsed — check your paste.")
+                    elif len(cleaned) < 6:
+                        st.warning(f"Only {len(cleaned)} names parsed — that's too small to split into 3 tiers. Need at least 6.")
+                    else:
+                        # Even split — any remainder goes to Tier 3 (longshots)
+                        # so a field of 100 becomes 33/33/34, and 101 becomes 33/33/35.
+                        _N = len(cleaned)
+                        _per = _N // 3
+                        _sz1 = _per
+                        _sz2 = _per
+                        t1 = cleaned[:_sz1]
+                        t2 = cleaned[_sz1:_sz1 + _sz2]
+                        t3 = cleaned[_sz1 + _sz2:]   # gets the remainder
+                        ok, msg = update_tier_lists_in_source(t1, t2, t3)
+                        if ok:
+                            st.success(
+                                f"Parsed **{_N}** golfers → Tier 1: **{len(t1)}** · Tier 2: **{len(t2)}** · Tier 3: **{len(t3)}**\n\n{msg}"
+                            )
+                            # Show the three blocks the operator needs to paste into Google Form
+                            st.markdown("**Now paste these into your Google Form's pick-question dropdowns** (one per question):")
+                            gc1, gc2, gc3 = st.columns(3)
+                            with gc1:
+                                st.caption(f"Pick 1 (Tier 1) · {len(t1)}")
+                                st.code("\n".join(t1), language=None)
+                            with gc2:
+                                st.caption(f"Pick 2 (Tier 2) · {len(t2)}")
+                                st.code("\n".join(t2), language=None)
+                            with gc3:
+                                st.caption(f"Pick 3 (Tier 3) · {len(t3)}")
+                                st.code("\n".join(t3), language=None)
+                        else:
+                            st.error(msg)
+                            st.caption("Tiers were NOT written to app.py. Send Claude the field and he'll update it manually.")
 
             # ── Tee time / tournament start (for countdown strip) ──
             with st.expander("🕐 First Tee Time — drives the countdown strip", expanded=False):
