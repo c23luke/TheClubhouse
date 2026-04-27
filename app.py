@@ -844,8 +844,10 @@ html, body, [class*="css"] {
     background:#0d160d; border:1px solid #2a3d2a; border-radius:6px;
     padding:4px 10px; font-size:0.95rem; color:#c8d8c8; white-space:nowrap;
     font-weight:500;
+    display:inline-flex; align-items:baseline; gap:8px;
 }
 .pick-chip.best { border-color:#ffffff33; background:#1a2a1a; }
+.pick-chip-name { display:inline-flex; align-items:baseline; gap:4px; }
 .pick-score-under { color:#4ade80; font-weight:600; }
 .pick-score-over  { color:#f87171; font-weight:600; }
 .pick-score-even  { color:#8aad8a; font-weight:600; }
