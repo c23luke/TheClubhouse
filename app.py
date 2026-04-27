@@ -3463,9 +3463,10 @@ if _admin_visible:
                 _phase_label = "🆕 New Tournament Setup"
                 _phase_hint  = (
                     "It's early-week — time to prep the next pool. Workflow: "
-                    "<strong>📋 Tier-List Helper</strong> (paste the field, get tiers + Google Form lists) "
-                    "→ update <code>app.py</code> + Google Form → set the <strong>🕐 First Tee Time</strong> "
-                    "→ hit <strong>🔄 Start New Tournament</strong> to clear last week's board."
+                    "send the field to Claude → he updates <code>app.py</code> tiers and you mirror "
+                    "them in the Google Form → set the <strong>🕐 First Tee Time</strong> "
+                    "→ hit <strong>🔄 Start New Tournament</strong> to clear last week's board "
+                    "(Hall of Fame stays intact)."
                 )
             else:   # Thursday morning before tee-off
                 _phase_label = "⏰ Pre-Tee-Off"
@@ -3481,6 +3482,64 @@ if _admin_visible:
                 unsafe_allow_html=True,
             )
 
+            # ── Full weekly workflow (collapsible reference card) ──────
+            # Always-visible overview so the operator can scan the whole
+            # week's flow in order, regardless of what day it is. Each
+            # phase below corresponds to one of the colored admin groups.
+            with st.expander("📖 Full weekly workflow — every step in order", expanded=False):
+                st.markdown(
+                    """
+<div style="font-size:0.92rem; line-height:1.7; color:#d8e8d8;">
+
+<div style="background:#1a2a1a; border-left:3px solid #d4af37; padding:10px 14px; border-radius:6px; margin-bottom:10px;">
+<strong style="color:#d4af37;">🆕 Mon – Wed · Setup</strong>
+<ol style="margin:6px 0 0 18px; padding:0;">
+<li>Send the new tournament's <strong>field</strong> to Claude.</li>
+<li>Claude updates the <code>TIER_1 / TIER_2 / TIER_3</code> blocks in <code>app.py</code> (split evenly into 3).</li>
+<li>You mirror those same names into the Google Form's three pick-question dropdowns.</li>
+<li>Open <strong>🕐 First Tee Time</strong> and set Thursday's first group.</li>
+<li>Click <strong>🔄 Start New Tournament</strong> → wipes last week's board. Hall of Fame stays intact.</li>
+</ol>
+</div>
+
+<div style="background:#0d1a1f; border-left:3px solid #4ade80; padding:10px 14px; border-radius:6px; margin-bottom:10px;">
+<strong style="color:#4ade80;">⏰ Thu morning · Pre-Tee-Off</strong>
+<ol style="margin:6px 0 0 18px; padding:0;">
+<li>Make sure all paid Venmos are marked in <strong>💰 Payments</strong>.</li>
+<li>Once the first group tees off, flip <strong>🔒 Entry Gate</strong> ON to lock new entries out.</li>
+</ol>
+</div>
+
+<div style="background:#0d1a1f; border-left:3px solid #4ade80; padding:10px 14px; border-radius:6px; margin-bottom:10px;">
+<strong style="color:#4ade80;">🟢 Thu – Sun · During Tournament</strong>
+<ol style="margin:6px 0 0 18px; padding:0;">
+<li>Mark <strong>💰 Payments</strong> as Venmos come in (only paid entries count toward the pot).</li>
+<li>End of each round, take a <strong>📸 Rank Snapshot</strong> so movement arrows show overnight changes.</li>
+<li>Round winners auto-detect from low round-only score — only touch <strong>🏁 Round Winners (manual override)</strong> if it's wrong.</li>
+</ol>
+</div>
+
+<div style="background:#1a0d1a; border-left:3px solid #a78bfa; padding:10px 14px; border-radius:6px; margin-bottom:10px;">
+<strong style="color:#a78bfa;">🏁 Sun night · Wrap Up</strong>
+<ol style="margin:6px 0 0 18px; padding:0;">
+<li>Flip <strong>✅ Mark Tournament Finished</strong> ON — locks the Overall Champion card.</li>
+<li>Click <strong>📰 Weekly Recap</strong> → copy text into the group chat.</li>
+<li>Click <strong>📦 Archive Tournament</strong> → 👑 + ⭐ added to the Hall of Fame, win counts roll up by email.</li>
+</ol>
+<div style="font-size:0.85rem; color:#c0a8d8; margin-top:8px;">
+You're now ready to loop back to <strong>🆕 Setup</strong> for next week's tournament.
+</div>
+</div>
+
+<div style="font-size:0.85rem; color:#a7c9a7; padding:6px 14px;">
+💡 <strong>Hall of Fame is permanent.</strong> Every <strong>🔄 Start New Tournament</strong> wipes the current board, but archived tournaments and player win counts survive forever.
+</div>
+
+</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
             # ══════════════════════════════════════════════════════════
             # 🆕 NEW TOURNAMENT SETUP (Monday)
             # ══════════════════════════════════════════════════════════
@@ -3492,74 +3551,6 @@ if _admin_visible:
                 unsafe_allow_html=True,
             )
             st.caption("Run these Mon–Wed to prep for Thursday.")
-
-            # ── Tier-List Helper — paste a tournament field, get formatted tier arrays ──
-            with st.expander("📋 Tier-List Helper — paste field, get tiers", expanded=False):
-                st.caption(
-                    "Paste the tournament field below — one golfer per line, or comma-separated. "
-                    "Tool strips junk (rank numbers, odds, '+' signs), splits into 3 tiers by world rank "
-                    "order pasted, and generates both the Python `TIER_1/2/3 = [...]` snippet for app.py "
-                    "AND a Google Form dropdown list (one name per line). "
-                    "Defaults: ~12 in Tier 1 (stars), ~30 in Tier 2 (contenders), rest in Tier 3."
-                )
-                _field_text = st.text_area(
-                    "Paste field (one per line, or with ranks/odds — we'll clean it)",
-                    height=200, key="tier_field_text",
-                    placeholder="1. Scottie Scheffler +350\n2. Rory McIlroy +700\n..."
-                )
-                _tc1, _tc2, _tc3 = st.columns(3)
-                with _tc1:
-                    _n1 = st.number_input("Tier 1 size", min_value=1, max_value=50, value=12, step=1, key="tier1_sz")
-                with _tc2:
-                    _n2 = st.number_input("Tier 2 size", min_value=1, max_value=80, value=30, step=1, key="tier2_sz")
-                with _tc3:
-                    st.caption("Tier 3 = everyone else")
-
-                if st.button("Build tiers", key="btn_build_tiers"):
-                    import re as _re
-                    lines = [ln.strip() for ln in (_field_text or "").splitlines() if ln.strip()]
-                    if len(lines) == 1 and "," in lines[0]:
-                        lines = [x.strip() for x in lines[0].split(",") if x.strip()]
-                    cleaned = []
-                    seen = set()
-                    for ln in lines:
-                        s = _re.sub(r"^(t?\d+[\.\)]?\s*)", "", ln, flags=_re.I)
-                        s = _re.sub(r"\s*[+\-]\d+\s*$", "", s)
-                        s = _re.sub(r"\s*\([^)]*\)\s*$", "", s)
-                        s = _re.sub(r"\s+[A-Z]{3}\s*$", "", s)
-                        s = s.strip().strip(",").strip()
-                        if s and s.lower() not in seen:
-                            seen.add(s.lower())
-                            cleaned.append(s)
-                    if not cleaned:
-                        st.warning("No names parsed — check your paste.")
-                    else:
-                        t1 = cleaned[:int(_n1)]
-                        t2 = cleaned[int(_n1):int(_n1) + int(_n2)]
-                        t3 = cleaned[int(_n1) + int(_n2):]
-                        st.success(f"Parsed **{len(cleaned)}** golfers → Tier 1: {len(t1)} · Tier 2: {len(t2)} · Tier 3: {len(t3)}")
-                        py_lines = ["TIER_1 = ["]
-                        for n in t1: py_lines.append(f'    "{n}",')
-                        py_lines.append("]")
-                        py_lines.append("TIER_2 = [")
-                        for n in t2: py_lines.append(f'    "{n}",')
-                        py_lines.append("]")
-                        py_lines.append("TIER_3 = [")
-                        for n in t3: py_lines.append(f'    "{n}",')
-                        py_lines.append("]")
-                        st.markdown("**Python snippet for `app.py`:**")
-                        st.code("\n".join(py_lines), language="python")
-                        st.markdown("**Google Form dropdowns — paste into each pick question:**")
-                        gc1, gc2, gc3 = st.columns(3)
-                        with gc1:
-                            st.caption("Pick 1 (Tier 1)")
-                            st.code("\n".join(t1), language=None)
-                        with gc2:
-                            st.caption("Pick 2 (Tier 2)")
-                            st.code("\n".join(t2), language=None)
-                        with gc3:
-                            st.caption("Pick 3 (Tier 3)")
-                            st.code("\n".join(t3), language=None)
 
             # ── Tee time / tournament start (for countdown strip) ──
             with st.expander("🕐 First Tee Time — drives the countdown strip", expanded=False):
@@ -3606,8 +3597,8 @@ if _admin_visible:
                     st.rerun()
 
             # ── Start new tournament (the BIG reset — do this last) ──
-            st.markdown("**🔄 Start New Tournament** _(do this last, after tier list + tee time are set)_")
-            st.caption("Clears last week's entries from the board (cutoff by timestamp — nothing deleted from the sheet). Resets round winners and tournament status.")
+            st.markdown("**🔄 Start New Tournament** _(do this last, after tiers + tee time are set)_")
+            st.caption("Clears last week's entries from the board (cutoff by timestamp — nothing deleted from the sheet). Resets round winners and tournament status. **Hall of Fame is preserved** — past champions stay forever.")
             new_tourney_name = st.text_input(
                 "New tournament name (optional)",
                 placeholder="e.g. Cadillac Invitational 2026",
@@ -3727,6 +3718,21 @@ if _admin_visible:
             )
             st.caption("Day-to-day tournament management.")
 
+            # ── Entry Gate — flip ON Thursday morning when the first group tees off ──
+            st.markdown("**🔒 Entry Gate** _(flip ON Thursday morning at first tee)_")
+            st.caption("When frozen, the Join Pool section is hidden and new entries can't be submitted. Flip this ON once the first group tees off Thursday.")
+            _gate_new = st.toggle(
+                "Freeze entries (signups closed)",
+                value=bool(admin.get("entries_frozen", False)),
+                key="gate_toggle",
+            )
+            if _gate_new != bool(admin.get("entries_frozen", False)):
+                admin["entries_frozen"] = bool(_gate_new)
+                save_state(admin)
+                st.rerun()
+
+            st.markdown("---")
+
             # ── Payments (mark each entry paid) ──
             st.markdown("**💰 Payments**")
             st.caption(
@@ -3833,21 +3839,6 @@ if _admin_visible:
                     admin["rank_snapshot_time"] = ""
                     save_state(admin)
                     st.rerun()
-
-            st.markdown("---")
-
-            # ── Entry Gate — flip to freeze signups once the tournament starts ──
-            st.markdown("**🔒 Entry Gate**")
-            st.caption("When frozen, the Join Pool section is hidden and new entries can't be submitted. Flip this ON once the first group tees off Thursday.")
-            _gate_new = st.toggle(
-                "Freeze entries (signups closed)",
-                value=bool(admin.get("entries_frozen", False)),
-                key="gate_toggle",
-            )
-            if _gate_new != bool(admin.get("entries_frozen", False)):
-                admin["entries_frozen"] = bool(_gate_new)
-                save_state(admin)
-                st.rerun()
 
             st.markdown("---")
 
@@ -3973,7 +3964,7 @@ if _admin_visible:
 
             # ── Archive tournament ──
             st.markdown("**📦 Archive Tournament**")
-            st.caption("Lock in this week's final results to the all-time Hall of Fame. Do this after Sunday once winners are set.")
+            st.caption("Lock in this week's final results to the all-time Hall of Fame — the overall champ gets a 👑 and round wins add ⭐ stars. Win counts roll up by email so the same player accumulates across tournaments. Do this after Sunday once winners are set.")
             arc_name = st.text_input(
                 "Tournament name",
                 value=admin.get("tournament_name", ""),
