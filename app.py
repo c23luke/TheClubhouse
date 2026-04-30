@@ -503,6 +503,59 @@ html, body, [class*="css"] {
     margin-left:4px;
 }
 
+/* Standings header toolbar — six small pill buttons sitting next to the
+   "Pool Standings" title. Streamlit puts each button inside its own column,
+   so the styling targets [data-testid="stButton"] within the toolbar wrapper. */
+.standings-toolbar-wrap [data-testid="stButton"] > button {
+    background:#0d160d !important;
+    border:1px solid #2a3d2a !important;
+    border-radius:999px !important;
+    color:#c8d8c8 !important;
+    font-size:0.78rem !important;
+    font-weight:500 !important;
+    padding:5px 10px !important;
+    min-height:32px !important;
+    line-height:1.1 !important;
+    white-space:nowrap !important;
+    transition: all 0.15s ease;
+}
+.standings-toolbar-wrap [data-testid="stButton"] > button:hover {
+    background:#1a2a1a !important;
+    border-color:#3d5a3d !important;
+    color:#fff !important;
+}
+.standings-toolbar-wrap [data-testid="stButton"] > button[kind="primary"] {
+    background:#1a3d1a !important;
+    border-color:#4a7a4a !important;
+    color:#e0ece0 !important;
+}
+/* Active panel that opens below the toolbar */
+.toolbar-panel {
+    background:#0a140a; border:1px solid #2a3d2a; border-radius:10px;
+    padding:14px 16px; margin:6px 0 14px 0;
+}
+.toolbar-panel .panel-title {
+    color:#e0ece0; font-weight:600; font-size:0.95rem;
+    margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;
+}
+.toolbar-panel .panel-title .panel-sub {
+    color:#a7c9a7; font-size:0.78rem; font-weight:400;
+}
+.toolbar-panel .pot-row {
+    display:flex; justify-content:space-between; padding:6px 0;
+    border-bottom:1px dashed #1a2a1a; color:#c8d8c8; font-size:0.9rem;
+}
+.toolbar-panel .pot-row:last-child { border-bottom:none; }
+.toolbar-panel .pot-row .amt { color:#d4af37; font-weight:600; }
+.toolbar-panel .player-search-result {
+    padding:8px 10px; margin:6px 0; background:#0d160d;
+    border:1px solid #2a3d2a; border-radius:6px;
+    color:#c8d8c8; font-size:0.88rem;
+    display:flex; justify-content:space-between; align-items:center;
+}
+.toolbar-panel .player-search-result .pname { color:#fff; font-weight:600; }
+.toolbar-panel .player-search-result .ptier { color:#8aad8a; font-size:0.75rem; }
+
 /* ── Private League banner (shown when ?league=CODE) ── */
 .league-banner {
     background: linear-gradient(135deg, #1a2a1a, #1f3a2a);
@@ -1553,9 +1606,22 @@ div:has(> .join-pool-marker) + div .stButton > button:active {
 # ============================================================
 # HELPERS
 # ============================================================
+# Name aliases — when the Google Form has a golfer listed under one name
+# (e.g. "Samuel Stevens") but ESPN's leaderboard publishes a different
+# variant (e.g. "Sam Stevens"), the score_map lookup misses and the entry's
+# total silently defaults to 0. This map normalises form-name → ESPN-name
+# so existing sheet rows still resolve correctly. Add new entries here as
+# mismatches show up; the form's dropdown should also be updated to ESPN's
+# spelling so FUTURE submissions don't even need the alias.
+_NAME_ALIASES = {
+    "samuel stevens": "Sam Stevens",
+}
+
 def clean(x):
     if pd.isna(x): return ""
-    return str(x).split(" +")[0].strip()
+    s = str(x).split(" +")[0].strip()
+    # Apply alias if present (case-insensitive lookup, preserve mapped casing)
+    return _NAME_ALIASES.get(s.lower(), s)
 
 def fmt_score(val):
     if val == 0:  return "E"
@@ -2427,6 +2493,14 @@ def cumulative_vs_par(name, round_num, rounds_data, score_map_local, period, sta
     # Historical round: sum from linescores
     rounds = rounds_data.get(name, {})
     if any(r not in rounds for r in range(1, round_num + 1)):
+        # Missing linescore data. If we're computing the LATEST round (the
+        # live one), keep our answer consistent with the leaderboard total —
+        # which uses score_map.get(name, 0). A WD/DQ or a name-normalisation
+        # miss should leave the entry's daily delta alignable with par (0)
+        # rather than dropping the entire entry from the daily-winner calc
+        # and rendering "—" in their THU/FRI/SAT/SUN chip.
+        if latest > 0 and round_num == latest:
+            return 0
         return None
     return sum(rounds[r] for r in range(1, round_num + 1))
 
@@ -2941,106 +3015,14 @@ if not admin["entries_frozen"]:
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
-# LEAGUES  —  Create + Join-by-code, rendered as twin expanders so the
-# two CTAs look identical instead of a button+dropdown mismatch.
-# Leagues are a key viral hook — seeing friends create them drives more
-# invites — so they're always visible on the public pool view.
+# LEAGUES — post-create reveal
+# Create-league + Join-by-code forms now live inside the Pool Standings
+# toolbar (🏆 Create / 🔑 Join buttons), so this block only renders the
+# success card after a league is freshly minted. Leagues are a key viral
+# hook — the success card shows the code + share link prominently so the
+# commissioner can immediately blast it to their group chat.
 # ============================================================
 if not current_league and not admin.get("entries_frozen"):
-    with st.expander("🏆  Start a private league with your friends", expanded=False):
-        st.markdown(
-            "<div style='color:#a7c9a7; font-size:0.88rem; line-height:1.5; margin-bottom:8px;'>"
-            "Run your own mini-pool inside the Clubhouse. You set the entry fee, "
-            "invite your group via a shareable link, and the leaderboard filters "
-            "to just your crew."
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-        _cl_c1, _cl_c2 = st.columns([3, 1])
-        with _cl_c1:
-            _cl_name = st.text_input(
-                "League name",
-                key="create_league_name",
-                placeholder="e.g. Sunday Squad, The 19th Hole, Backyard Bros",
-                max_chars=40,
-            )
-        with _cl_c2:
-            _cl_fee = st.number_input(
-                "Entry fee ($)",
-                key="create_league_fee",
-                min_value=1, max_value=500, value=10, step=1,
-            )
-
-        _cl_email = st.text_input(
-            "Your email (league commissioner)",
-            key="create_league_email",
-            placeholder="you@example.com",
-            help="We use this to mark you as the league's creator.",
-        )
-
-        _cl_custom_code = st.text_input(
-            "Custom code (optional)",
-            key="create_league_custom_code",
-            placeholder="e.g. TIGER, DADSPOOL, SQUAD26",
-            max_chars=12,
-            help="Make it memorable so friends can join by typing the code. "
-                 "3-12 letters/numbers. Leave blank for an auto-generated code.",
-        )
-
-        _cl_submit = st.button(
-            "Create League",
-            key="btn_create_league",
-            type="primary",
-            use_container_width=True,
-        )
-
-        if _cl_submit:
-            _errs = []
-            _nm = (_cl_name or "").strip()
-            _em = (_cl_email or "").strip().lower()
-            if not _nm:
-                _errs.append("League name is required.")
-            if not _em or "@" not in _em or "." not in _em.split("@")[-1]:
-                _errs.append("A valid email is required.")
-
-            # Validate optional vanity code BEFORE we mint anything
-            _existing = set((admin.get("leagues") or {}).keys())
-            _typed_code = _cl_custom_code or ""
-            _vanity_code, _vanity_err = _validate_vanity_code(_typed_code, _existing)
-            if _vanity_err:
-                _errs.append(_vanity_err)
-
-            if _errs:
-                for _e in _errs:
-                    st.error(_e)
-            else:
-                # Use the vanity code if one was supplied, else auto-mint
-                if _vanity_code:
-                    _new_code = _vanity_code
-                else:
-                    _new_code = _generate_league_code(_existing)
-
-                # Persist the league
-                from datetime import datetime as _dt_lg
-                admin.setdefault("leagues", {})[_new_code] = {
-                    "name": _nm,
-                    "fee": int(_cl_fee),
-                    "commissioner_email": _em,
-                    "created_at": _dt_lg.now().isoformat(),
-                    "members": [_em],
-                }
-                # Auto-join the commissioner
-                admin.setdefault("league_memberships", {})[_em] = _new_code
-                save_state(admin)
-
-                # Stash for the post-create reveal
-                st.session_state["last_created_league_code"] = _new_code
-                st.session_state["last_created_league_name"] = _nm
-                st.session_state["last_created_league_fee"]  = int(_cl_fee)
-                st.rerun()
-
-    # Post-create success block — appears once, right below the expander.
     _new_code = st.session_state.get("last_created_league_code", "")
     if _new_code:
         _lgc = _leagues_store.get(_new_code, {}) or admin.get("leagues", {}).get(_new_code, {})
@@ -3065,24 +3047,332 @@ if not current_league and not admin.get("entries_frozen"):
                 st.session_state.pop(_k, None)
             st.rerun()
 
-# Join-by-code — sibling expander to Create-a-league. Shown even when
-# entries are locked (a late friend can still pull up a league's scoped
-# standings by typing the code their buddy gave them).
-if not current_league:
-    _render_join_by_code_inline(admin)
+# Join-by-code now lives inside the Pool Standings toolbar (🔑 Join league
+# button) instead of a separate expander, so the leaderboard sits higher.
 
 # ============================================================
-# POOL STANDINGS
+# POOL STANDINGS  —  title + compact action toolbar
 # ============================================================
-# In a private league, the section title reflects the league name instead
-# of the generic "Pool Standings" label so the view feels scoped.
-# Tournament name intentionally NOT repeated here — it's already in the
-# hero subtitle, so showing it again would just add visual noise.
+# Six pill-buttons sit on the same row as the section title so the most-
+# wanted actions (find me, create league, join league, find player, pot
+# breakdown, share my picks) are one tap away without pushing the
+# leaderboard down. Each button toggles a small inline panel below the
+# toolbar — a single panel is open at a time. In a private league the
+# section title reflects the league name instead of the generic
+# "Pool Standings" label so the view feels scoped. Tournament name
+# intentionally NOT repeated here — it's already in the hero subtitle.
 if current_league:
     _ps_heading = f'{current_league.get("name","League")} Standings'
 else:
     _ps_heading = "Pool Standings"
-st.markdown(f'<div class="section-title">{_ps_heading}</div>', unsafe_allow_html=True)
+
+# Toolbar state — None = no panel open
+if "toolbar_panel" not in st.session_state:
+    st.session_state.toolbar_panel = None
+
+st.markdown('<div class="standings-toolbar-wrap">', unsafe_allow_html=True)
+_tb_cols = st.columns([2.4, 1, 1.1, 1.1, 1.1, 1.2, 1.2])
+with _tb_cols[0]:
+    st.markdown(
+        f'<div class="section-title" style="margin-bottom:0;">{_ps_heading}</div>',
+        unsafe_allow_html=True,
+    )
+
+_tb_active = st.session_state.toolbar_panel
+_tb_buttons = [
+    ("find_me",       "👤 Find me",        _tb_cols[1]),
+    ("create_league", "🏆 Create",         _tb_cols[2]),
+    ("join_league",   "🔑 Join",           _tb_cols[3]),
+    ("find_player",   "🔍 Find player",    _tb_cols[4]),
+    ("pot",           "💰 Pot breakdown",  _tb_cols[5]),
+    ("share",         "📤 Share picks",    _tb_cols[6]),
+]
+for _tb_key, _tb_label, _tb_col in _tb_buttons:
+    with _tb_col:
+        if st.button(
+            _tb_label,
+            key=f"tb_btn_{_tb_key}",
+            type=("primary" if _tb_active == _tb_key else "secondary"),
+            use_container_width=True,
+        ):
+            # Toggle: clicking the active button closes the panel.
+            st.session_state.toolbar_panel = None if _tb_active == _tb_key else _tb_key
+            st.rerun()
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── Toolbar panel renderer — conditional on which button is active ──
+_tb_panel = st.session_state.toolbar_panel
+if _tb_panel:
+    st.markdown('<div class="toolbar-panel">', unsafe_allow_html=True)
+
+    # ---- 👤 Find me ----------------------------------------------------
+    if _tb_panel == "find_me":
+        st.markdown(
+            '<div class="panel-title">👤 Find me on the leaderboard'
+            '<span class="panel-sub">we\'ll highlight your row</span></div>',
+            unsafe_allow_html=True,
+        )
+        _fm_c1, _fm_c2 = st.columns([4, 1])
+        with _fm_c1:
+            _fm_email = st.text_input(
+                "Your email",
+                key="tb_findme_email",
+                placeholder="you@example.com",
+                label_visibility="collapsed",
+            )
+        with _fm_c2:
+            _fm_save = st.button(
+                "Highlight",
+                key="tb_btn_findme_save",
+                type="primary",
+                use_container_width=True,
+            )
+        if _fm_save and (_fm_email or "").strip():
+            st.session_state.my_email = _fm_email.strip().lower()
+            st.session_state.toolbar_panel = None
+            st.rerun()
+
+    # ---- 🏆 Create league ----------------------------------------------
+    elif _tb_panel == "create_league":
+        if admin.get("entries_frozen"):
+            st.info("Entries are locked — leagues can't be created mid-tournament.")
+        elif current_league:
+            st.info("You're already inside a league. Return to the public pool to create a new one.")
+        else:
+            st.markdown(
+                '<div class="panel-title">🏆 Start a private league'
+                '<span class="panel-sub">your crew, your fee, your leaderboard</span></div>',
+                unsafe_allow_html=True,
+            )
+            _cl_c1, _cl_c2 = st.columns([3, 1])
+            with _cl_c1:
+                _cl_name = st.text_input(
+                    "League name",
+                    key="create_league_name",
+                    placeholder="e.g. Sunday Squad, The 19th Hole",
+                    max_chars=40,
+                )
+            with _cl_c2:
+                _cl_fee = st.number_input(
+                    "Entry fee ($)",
+                    key="create_league_fee",
+                    min_value=1, max_value=500, value=10, step=1,
+                )
+            _cl_email = st.text_input(
+                "Your email (commissioner)",
+                key="create_league_email",
+                placeholder="you@example.com",
+                help="We use this to mark you as the league's creator.",
+            )
+            _cl_custom_code = st.text_input(
+                "Custom code (optional)",
+                key="create_league_custom_code",
+                placeholder="e.g. TIGER, DADSPOOL, SQUAD26",
+                max_chars=12,
+                help="3-12 letters/numbers. Leave blank for an auto-generated code.",
+            )
+            _cl_submit = st.button(
+                "Create League",
+                key="btn_create_league",
+                type="primary",
+                use_container_width=True,
+            )
+            if _cl_submit:
+                _errs = []
+                _nm = (_cl_name or "").strip()
+                _em = (_cl_email or "").strip().lower()
+                if not _nm:
+                    _errs.append("League name is required.")
+                if not _em or "@" not in _em or "." not in _em.split("@")[-1]:
+                    _errs.append("A valid email is required.")
+                _existing = set((admin.get("leagues") or {}).keys())
+                _typed_code = _cl_custom_code or ""
+                _vanity_code, _vanity_err = _validate_vanity_code(_typed_code, _existing)
+                if _vanity_err:
+                    _errs.append(_vanity_err)
+                if _errs:
+                    for _e in _errs:
+                        st.error(_e)
+                else:
+                    if _vanity_code:
+                        _new_code_made = _vanity_code
+                    else:
+                        _new_code_made = _generate_league_code(_existing)
+                    from datetime import datetime as _dt_lg
+                    admin.setdefault("leagues", {})[_new_code_made] = {
+                        "name": _nm,
+                        "fee": int(_cl_fee),
+                        "commissioner_email": _em,
+                        "created_at": _dt_lg.now().isoformat(),
+                        "members": [_em],
+                    }
+                    admin.setdefault("league_memberships", {})[_em] = _new_code_made
+                    save_state(admin)
+                    st.session_state["last_created_league_code"] = _new_code_made
+                    st.session_state["last_created_league_name"] = _nm
+                    st.session_state["last_created_league_fee"]  = int(_cl_fee)
+                    st.session_state.toolbar_panel = None
+                    st.rerun()
+
+    # ---- 🔑 Join league ------------------------------------------------
+    elif _tb_panel == "join_league":
+        st.markdown(
+            '<div class="panel-title">🔑 Have a league code?'
+            '<span class="panel-sub">jump into your friends\' league</span></div>',
+            unsafe_allow_html=True,
+        )
+        _jc1, _jc2 = st.columns([3, 1])
+        with _jc1:
+            _jc_typed = st.text_input(
+                "League code",
+                key="join_by_code_input",
+                placeholder="e.g. TIGER",
+                max_chars=12,
+                label_visibility="collapsed",
+            )
+        with _jc2:
+            _jc_go = st.button(
+                "Join",
+                key="btn_do_join_by_code",
+                type="primary",
+                use_container_width=True,
+            )
+        if _jc_go:
+            _norm = _normalize_league_code(_jc_typed or "")
+            if not _norm:
+                st.error("Please type a league code.")
+            else:
+                _all_codes = set((admin.get("leagues") or {}).keys())
+                if _norm not in _all_codes:
+                    st.error(
+                        f"No league found with code '{_norm}'. "
+                        "Double-check the spelling with your friend."
+                    )
+                else:
+                    try:
+                        st.query_params["league"] = _norm
+                    except Exception:
+                        try:
+                            st.experimental_set_query_params(league=_norm)
+                        except Exception:
+                            pass
+                    st.session_state.pop("join_by_code_input", None)
+                    st.session_state.toolbar_panel = None
+                    st.rerun()
+
+    # ---- 🔍 Find player ------------------------------------------------
+    elif _tb_panel == "find_player":
+        st.markdown(
+            '<div class="panel-title">🔍 Find a player'
+            '<span class="panel-sub">search the current pool by name</span></div>',
+            unsafe_allow_html=True,
+        )
+        _fp_q = st.text_input(
+            "Player name",
+            key="tb_findplayer_q",
+            placeholder="Type a name…",
+            label_visibility="collapsed",
+        )
+        if _fp_q and _fp_q.strip():
+            _fp_norm = _fp_q.strip().lower()
+            if not df_display.empty:
+                _fp_matches = df_display[
+                    df_display["Name"].str.lower().str.contains(_fp_norm, na=False)
+                ]
+                if _fp_matches.empty:
+                    st.markdown(
+                        '<div style="color:#a7c9a7; font-size:0.85rem; padding:6px 0;">'
+                        'No players match that search.</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    for _fp_idx, _fp_r in _fp_matches.head(10).iterrows():
+                        _fp_rank = int(_fp_idx) + 1
+                        _fp_tot = _fp_r.get("Total", 0)
+                        if _fp_tot == 0:
+                            _fp_tot_disp = "E"
+                        elif _fp_tot > 0:
+                            _fp_tot_disp = f"+{_fp_tot}"
+                        else:
+                            _fp_tot_disp = f"{_fp_tot}"
+                        st.markdown(
+                            f'<div class="player-search-result">'
+                            f'<span class="pname">#{_fp_rank} · {_fp_r["Name"]}</span>'
+                            f'<span class="ptier">{_fp_tot_disp}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+            else:
+                st.markdown(
+                    '<div style="color:#a7c9a7; font-size:0.85rem;">No entries yet.</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ---- 💰 Pot breakdown ----------------------------------------------
+    elif _tb_panel == "pot":
+        st.markdown(
+            '<div class="panel-title">💰 Pot breakdown'
+            '<span class="panel-sub">live, based on paid entries</span></div>',
+            unsafe_allow_html=True,
+        )
+        _fee_disp = ENTRY_FEE_ACTIVE
+        _daily_pct_disp = int(round(DAILY_PCT * 100))
+        _overall_pct_disp = int(round(OVERALL_PCT * 100))
+        st.markdown(
+            f'<div class="pot-row"><span>Paid entries</span>'
+            f'<span class="amt">{paid_count} × ${_fee_disp}</span></div>'
+            f'<div class="pot-row"><span>Total pot</span>'
+            f'<span class="amt">${pot:.2f}</span></div>'
+            f'<div class="pot-row"><span>Each round winner ({_daily_pct_disp}% × 4)</span>'
+            f'<span class="amt">${daily_payout:.2f}</span></div>'
+            f'<div class="pot-row"><span>Overall champion ({_overall_pct_disp}%)</span>'
+            f'<span class="amt">${overall_payout:.2f}</span></div>',
+            unsafe_allow_html=True,
+        )
+        if pending_count > 0:
+            st.caption(f"⏳ {pending_count} pending — pot will grow once they pay.")
+
+    # ---- 📤 Share my picks --------------------------------------------
+    elif _tb_panel == "share":
+        if st.session_state.get("entry_submitted"):
+            _sp_picks = st.session_state.get("entry_submitted_picks", [])
+            _sp_fullname = st.session_state.get("entry_submitted_fullname", "Your")
+            if len(_sp_picks) == 3:
+                _sp_tier_labels = ["Favorite", "Contender", "Longshot"]
+                _sp_picks_rows = ""
+                for _sp_tier, _sp_pick in zip(_sp_tier_labels, _sp_picks):
+                    _sp_picks_rows += (
+                        f'<div class="brag-pick"><span>{_sp_pick}</span>'
+                        f'<span class="tier">{_sp_tier}</span></div>'
+                    )
+                _sp_brag_html = (
+                    f'<div class="brag-card">'
+                    f'<div class="brag-badge">⛳ The Clubhouse</div>'
+                    f'<div class="brag-header">{_sp_fullname}\'s Picks</div>'
+                    f'<div class="brag-sub">Locked in · ${ENTRY_FEE} entry</div>'
+                    f'<div class="brag-picks">{_sp_picks_rows}</div>'
+                    f'<div class="brag-footer">Low combined score wins · '
+                    f'<strong>{APP_URL.replace("https://","")}</strong></div>'
+                    f'</div>'
+                )
+                st.markdown(_sp_brag_html, unsafe_allow_html=True)
+                st.caption("📸 Screenshot this card and share it to your group chat.")
+            else:
+                st.markdown(
+                    '<div style="color:#a7c9a7; font-size:0.85rem;">'
+                    'No picks to share yet — submit an entry first.</div>',
+                    unsafe_allow_html=True,
+                )
+            render_share_block(variant="compact")
+        else:
+            st.markdown(
+                '<div style="color:#a7c9a7; font-size:0.9rem; margin-bottom:6px;">'
+                'Submit your picks first to unlock your shareable card.</div>',
+                unsafe_allow_html=True,
+            )
+            render_share_block(variant="default")
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ---- "Who are you?" identity strip (persists across rerenders via session state) ----
 # Auto-seed from entry submission or returning-user lookup if we have that info.
@@ -3111,41 +3401,8 @@ if my_row_preview is not None:
     if st.button("Not me — forget this", key="btn_forget_me", type="secondary"):
         st.session_state.my_email = ""
         st.rerun()
-else:
-    # Compact inline "Highlight me" toggle — tiny link that expands a small form.
-    if "show_highlight_me" not in st.session_state:
-        st.session_state.show_highlight_me = False
-
-    if not st.session_state.show_highlight_me:
-        st.markdown(
-            '<div class="highlight-me-toggle-wrap"></div>',
-            unsafe_allow_html=True,
-        )
-        if st.button("👤 Highlight me", key="btn_show_highlight", type="secondary"):
-            st.session_state.show_highlight_me = True
-            st.rerun()
-    else:
-        st.markdown('<div class="highlight-me-inline">', unsafe_allow_html=True)
-        _hc1, _hc2, _hc3 = st.columns([4, 2, 1])
-        with _hc1:
-            _e = st.text_input(
-                "Your email",
-                key="id_email_input",
-                placeholder="you@example.com",
-                label_visibility="collapsed",
-            )
-        with _hc2:
-            _save = st.button("Remember me", key="btn_remember_me", use_container_width=True)
-        with _hc3:
-            _cancel = st.button("✕", key="btn_hide_highlight", use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        if _save and _e.strip():
-            st.session_state.my_email = _e.strip().lower()
-            st.session_state.show_highlight_me = False
-            st.rerun()
-        if _cancel:
-            st.session_state.show_highlight_me = False
-            st.rerun()
+# (No "else" here — the "👤 Find me" toolbar button on the Pool Standings
+# header is now the entry point for highlighting yourself on the leaderboard.)
 
 if not df_display.empty:
     min_score = df_display["Total"].min()
