@@ -503,19 +503,20 @@ html, body, [class*="css"] {
     margin-left:4px;
 }
 
-/* Standings header toolbar — six small pill buttons sitting next to the
+/* Standings header toolbar — three tiny pill buttons sitting next to the
    "Pool Standings" title. Streamlit puts each button inside its own column,
-   so the styling targets [data-testid="stButton"] within the toolbar wrapper. */
+   so the styling targets [data-testid="stButton"] within the toolbar wrapper.
+   Sized down deliberately on mobile so the leaderboard stays above the fold. */
 .standings-toolbar-wrap [data-testid="stButton"] > button {
     background:#0d160d !important;
     border:1px solid #2a3d2a !important;
     border-radius:999px !important;
     color:#c8d8c8 !important;
-    font-size:0.78rem !important;
+    font-size:0.7rem !important;
     font-weight:500 !important;
-    padding:5px 10px !important;
-    min-height:32px !important;
-    line-height:1.1 !important;
+    padding:3px 6px !important;
+    min-height:26px !important;
+    line-height:1.05 !important;
     white-space:nowrap !important;
     transition: all 0.15s ease;
 }
@@ -3069,9 +3070,16 @@ else:
 # Toolbar state — None = no panel open
 if "toolbar_panel" not in st.session_state:
     st.session_state.toolbar_panel = None
+# Guard against stale values left over from older toolbars (find_player,
+# pot, share were removed). Reset them so no orphaned panel sticks open.
+if st.session_state.toolbar_panel not in (None, "find_me", "create_league", "join_league"):
+    st.session_state.toolbar_panel = None
 
 st.markdown('<div class="standings-toolbar-wrap">', unsafe_allow_html=True)
-_tb_cols = st.columns([2.4, 1, 1.1, 1.1, 1.1, 1.2, 1.2])
+# Title gets the lion's share of the row; three small pills hug the right
+# edge. Wider title column = narrower buttons = leaderboard sits higher,
+# especially on mobile where columns stack only after a hard breakpoint.
+_tb_cols = st.columns([3.4, 1, 1, 1])
 with _tb_cols[0]:
     st.markdown(
         f'<div class="section-title" style="margin-bottom:0;">{_ps_heading}</div>',
@@ -3080,12 +3088,9 @@ with _tb_cols[0]:
 
 _tb_active = st.session_state.toolbar_panel
 _tb_buttons = [
-    ("find_me",       "👤 Find me",        _tb_cols[1]),
-    ("create_league", "🏆 Create",         _tb_cols[2]),
-    ("join_league",   "🔑 Join",           _tb_cols[3]),
-    ("find_player",   "🔍 Find player",    _tb_cols[4]),
-    ("pot",           "💰 Pot breakdown",  _tb_cols[5]),
-    ("share",         "📤 Share picks",    _tb_cols[6]),
+    ("find_me",       "👤 Me",     _tb_cols[1]),
+    ("create_league", "🏆 Create", _tb_cols[2]),
+    ("join_league",   "🔑 Join",   _tb_cols[3]),
 ]
 for _tb_key, _tb_label, _tb_col in _tb_buttons:
     with _tb_col:
@@ -3259,118 +3264,6 @@ if _tb_panel:
                     st.session_state.pop("join_by_code_input", None)
                     st.session_state.toolbar_panel = None
                     st.rerun()
-
-    # ---- 🔍 Find player ------------------------------------------------
-    elif _tb_panel == "find_player":
-        st.markdown(
-            '<div class="panel-title">🔍 Find a player'
-            '<span class="panel-sub">search the current pool by name</span></div>',
-            unsafe_allow_html=True,
-        )
-        _fp_q = st.text_input(
-            "Player name",
-            key="tb_findplayer_q",
-            placeholder="Type a name…",
-            label_visibility="collapsed",
-        )
-        if _fp_q and _fp_q.strip():
-            _fp_norm = _fp_q.strip().lower()
-            if not df_display.empty:
-                _fp_matches = df_display[
-                    df_display["Name"].str.lower().str.contains(_fp_norm, na=False)
-                ]
-                if _fp_matches.empty:
-                    st.markdown(
-                        '<div style="color:#a7c9a7; font-size:0.85rem; padding:6px 0;">'
-                        'No players match that search.</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    for _fp_idx, _fp_r in _fp_matches.head(10).iterrows():
-                        _fp_rank = int(_fp_idx) + 1
-                        _fp_tot = _fp_r.get("Total", 0)
-                        if _fp_tot == 0:
-                            _fp_tot_disp = "E"
-                        elif _fp_tot > 0:
-                            _fp_tot_disp = f"+{_fp_tot}"
-                        else:
-                            _fp_tot_disp = f"{_fp_tot}"
-                        st.markdown(
-                            f'<div class="player-search-result">'
-                            f'<span class="pname">#{_fp_rank} · {_fp_r["Name"]}</span>'
-                            f'<span class="ptier">{_fp_tot_disp}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-            else:
-                st.markdown(
-                    '<div style="color:#a7c9a7; font-size:0.85rem;">No entries yet.</div>',
-                    unsafe_allow_html=True,
-                )
-
-    # ---- 💰 Pot breakdown ----------------------------------------------
-    elif _tb_panel == "pot":
-        st.markdown(
-            '<div class="panel-title">💰 Pot breakdown'
-            '<span class="panel-sub">live, based on paid entries</span></div>',
-            unsafe_allow_html=True,
-        )
-        _fee_disp = ENTRY_FEE_ACTIVE
-        _daily_pct_disp = int(round(DAILY_PCT * 100))
-        _overall_pct_disp = int(round(OVERALL_PCT * 100))
-        st.markdown(
-            f'<div class="pot-row"><span>Paid entries</span>'
-            f'<span class="amt">{paid_count} × ${_fee_disp}</span></div>'
-            f'<div class="pot-row"><span>Total pot</span>'
-            f'<span class="amt">${pot:.2f}</span></div>'
-            f'<div class="pot-row"><span>Each round winner ({_daily_pct_disp}% × 4)</span>'
-            f'<span class="amt">${daily_payout:.2f}</span></div>'
-            f'<div class="pot-row"><span>Overall champion ({_overall_pct_disp}%)</span>'
-            f'<span class="amt">${overall_payout:.2f}</span></div>',
-            unsafe_allow_html=True,
-        )
-        if pending_count > 0:
-            st.caption(f"⏳ {pending_count} pending — pot will grow once they pay.")
-
-    # ---- 📤 Share my picks --------------------------------------------
-    elif _tb_panel == "share":
-        if st.session_state.get("entry_submitted"):
-            _sp_picks = st.session_state.get("entry_submitted_picks", [])
-            _sp_fullname = st.session_state.get("entry_submitted_fullname", "Your")
-            if len(_sp_picks) == 3:
-                _sp_tier_labels = ["Favorite", "Contender", "Longshot"]
-                _sp_picks_rows = ""
-                for _sp_tier, _sp_pick in zip(_sp_tier_labels, _sp_picks):
-                    _sp_picks_rows += (
-                        f'<div class="brag-pick"><span>{_sp_pick}</span>'
-                        f'<span class="tier">{_sp_tier}</span></div>'
-                    )
-                _sp_brag_html = (
-                    f'<div class="brag-card">'
-                    f'<div class="brag-badge">⛳ The Clubhouse</div>'
-                    f'<div class="brag-header">{_sp_fullname}\'s Picks</div>'
-                    f'<div class="brag-sub">Locked in · ${ENTRY_FEE} entry</div>'
-                    f'<div class="brag-picks">{_sp_picks_rows}</div>'
-                    f'<div class="brag-footer">Low combined score wins · '
-                    f'<strong>{APP_URL.replace("https://","")}</strong></div>'
-                    f'</div>'
-                )
-                st.markdown(_sp_brag_html, unsafe_allow_html=True)
-                st.caption("📸 Screenshot this card and share it to your group chat.")
-            else:
-                st.markdown(
-                    '<div style="color:#a7c9a7; font-size:0.85rem;">'
-                    'No picks to share yet — submit an entry first.</div>',
-                    unsafe_allow_html=True,
-                )
-            render_share_block(variant="compact")
-        else:
-            st.markdown(
-                '<div style="color:#a7c9a7; font-size:0.9rem; margin-bottom:6px;">'
-                'Submit your picks first to unlock your shareable card.</div>',
-                unsafe_allow_html=True,
-            )
-            render_share_block(variant="default")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
