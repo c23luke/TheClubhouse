@@ -149,7 +149,7 @@ TIER_2 = [
 ]
 TIER_3 = [
     "Sahith Theegala",
-    "Samuel Stevens",
+    "Sam Stevens",
     "Alex Noren",
     "Ryan Gerard",
     "Pierceson Coody",
